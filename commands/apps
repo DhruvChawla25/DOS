@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# help: list apps added with install (name, source, package)
+set -euo pipefail
+DOS_ROOT="${DOS_ROOT:-/opt/dos}"
+# shellcheck source=SCRIPTDIR/../lib/dos.sh
+source "$DOS_ROOT/lib/dos.sh"
+# shellcheck source=SCRIPTDIR/../modules/70-apps/apps.sh
+source "$DOS_ROOT/modules/70-apps/apps.sh"
+
+rows=$(apps_rows)
+if [[ -z $rows ]]; then
+  echo "No apps yet. Try: install vlc, install --debian vlc or install --flatpak com.discordapp.Discord"
+  exit 0
+fi
+{
+  printf 'NAME\tSOURCE\tPACKAGE\n'
+  printf '%s\n' "$rows" | awk -F'\t' '{
+    s = $2
+    if (s == "pacman") s = "arch repos"; else if (s == "aur") s = "AUR"
+    else if (s == "flatpak") s = "Flathub"; else s = s " (dos-" s ")"
+    print $1 "\t" s "\t" $3 }' | sort
+} | column -t -s $'\t'
