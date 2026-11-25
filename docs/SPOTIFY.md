@@ -25,7 +25,7 @@ hand.
   overwrites it. It runs Spotify as a native Wayland client
   (`--ozone-platform=wayland`), which uses less memory than XWayland.
 - `storage.size=2048` in `~/.config/spotify/prefs` limits the cache to 2 GB.
-  The cache saves the slow HDD from re-downloading songs you play often.
+  Songs you play often stay in the cache, so they don't download again.
 - If the window is blank or Spotify won't start, use `spotify --x11`.
 - Run `spotify-launcher -v --skip-update --no-exec` in a terminal to see what
   it would pass to Spotify.
@@ -33,15 +33,14 @@ hand.
 ## Logging in
 
 The first time Spotify opens, log in with your email and password (or the
-one-time code Spotify can email you). If you use "Continue with Google/Apple/Facebook", Spotify
-opens the default browser, so run `chrome` once first. You stay logged in after
-that.
+one-time code Spotify can email you). If you use "Continue with
+Google/Apple/Facebook", Spotify opens the default browser, so run `chrome` once
+first. You stay logged in after that.
 
 ## Free tier
 
 The free tier works on Linux the same as on Windows: you can play music, with
-ads. You need Premium to download songs for
-offline listening.
+ads. You need Premium to download songs for offline listening.
 
 ## Media commands
 
