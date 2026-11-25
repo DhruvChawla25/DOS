@@ -4,6 +4,9 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+concurrency:
+  group: iso-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build-iso:
     runs-on: ubuntu-latest
