@@ -69,3 +69,23 @@ only extra cost is disk space for each distro's base image.
 | Boot from GRUB to `DOS>` | under 15 s |
 | RAM used at `DOS>` | under 400 MB |
 | Background services | NetworkManager, PipeWire, thermald, power-profiles-daemon; nothing else |
+
+## DOS base and updates
+
+The pendrive installs only the **DOS base**:
+
+| Part | Packages / setup |
+|------|------------------|
+| Kernel + firmware | linux, linux-firmware, intel-ucode |
+| Network | networkmanager (`nmtui` for Wi-Fi) |
+| Speed | zram-generator, BFQ rule, sysctl tuning, thermald, power-profiles-daemon (performance) |
+| Graphics | mesa, vulkan-intel, intel-media-driver |
+| User | `dhruv` with sudo, autologin on tty1 |
+| Tools | git, github-cli, base-devel, nodejs (for tooling) |
+| Claude Code | native installer, run on first boot as `dhruv` |
+
+On first boot, DOS prints a short welcome: connect Wi-Fi (`nmtui`), run
+`claude` once to sign in, then turn on `/remote-control`. From then on, DOS
+updates are Claude Code sessions on the laptop, driven over Remote Control.
+Each change is committed to this repo on the `claude` branch and merged by PR,
+the same way as now.

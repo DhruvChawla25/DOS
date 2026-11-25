@@ -40,11 +40,20 @@ EFI partition.
 | 0 | Repo, CI, hardware check (`scripts/collect-info.sh`) | ✅ |
 | 0.5 | Speed base for the current Arch (`scripts/01-speed-base.sh`) | ready, dry run passed |
 | 1 | DOS live ISO built in CI with archiso (`scripts/build-iso.sh`) | in progress |
-| 2 | DOS Shell (Rust): command prompt, app commands, `help` | planned |
-| 3 | `dos-install`: safe install to a chosen partition + GRUB entry | planned |
-| 4 | Display (sway, no desktop) + HDMI extend | planned |
-| 5 | Apps: Chrome, Spotify, TLauncher, Heroic | planned |
-| 6 | `install` (Distrobox / Flatpak) and `win` (Wine) | planned |
+| 2 | `dos-install`: DOS base on a chosen partition + GRUB entry | next |
+| 3 | Claude Code in the base, Remote Control on | next |
+| — | **Everything below ships as updates through Claude Code on the laptop** | |
+| 4 | DOS Shell (Rust): command prompt, app commands, `help` | planned |
+| 5 | Display (sway, no desktop) + HDMI extend | planned |
+| 6 | Apps: Chrome, Spotify, TLauncher, Heroic | planned |
+| 7 | `install` (Distrobox / Flatpak) and `win` (Wine) | planned |
+
+## How DOS is updated
+
+The ISO only installs a small **DOS base**: kernel, drivers, network, speed
+tuning and Claude Code. Every later feature is built on the laptop itself by
+Claude Code, which is driven over Remote Control and commits each change to this
+repo. That avoids rebuilding and reflashing the pendrive for every change.
 
 ## Build the ISO yourself (on Arch)
 
