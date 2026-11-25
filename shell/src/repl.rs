@@ -135,6 +135,12 @@ impl Shell {
             crate::VERSION,
             self.paint("1", "help")
         );
+        // Login notices from profile.d aren't visible inside sway, so the shell
+        // shows the daily "updates available" line itself. Quiet if absent.
+        let _ = std::process::Command::new("dos-update")
+            .arg("--notice")
+            .stdin(std::process::Stdio::null())
+            .status();
     }
 
     fn remember(&mut self, line: &str) {
