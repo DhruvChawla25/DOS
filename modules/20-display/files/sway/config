@@ -1,0 +1,85 @@
+# DOS sway config. Installed by modules/20-display to ~/.config/sway/config;
+# dos-update overwrites it. Put your own lines in ~/.config/sway/config.d/.
+#
+# Workspace 1 is the DOS Shell. Every other window (Wayland app_id or XWayland
+# class: Chrome, Spotify, Heroic, Java, Wine .exe ...) gets its own workspace,
+# full screen, via dos-sway-apps; only the dos-shell foot window is exempt.
+# Closing an app goes back to workspace 1.
+
+set $mod Mod4
+
+# ---- Look: nothing but the app -------------------------------------------
+default_border none
+default_floating_border none
+hide_edge_borders --i3 both
+titlebar_border_thickness 0
+titlebar_padding 1
+gaps inner 0
+gaps outer 0
+font pango:DejaVu Sans 9
+# No wallpaper process at all.
+swaybg_command -
+# No bar: there is deliberately no "bar { }" block.
+
+# ---- Behaviour -------------------------------------------------------------
+focus_follows_mouse no
+mouse_warping none
+focus_on_window_activation focus
+popup_during_fullscreen smart
+workspace_layout default
+# Start Xwayland only when an X11 app (Spotify, Java, Wine) first needs it.
+xwayland enable
+# Hide the pointer after 3 s idle.
+seat * hide_cursor 3000
+
+input type:touchpad {
+    tap enabled
+    dwt enabled
+    natural_scroll disabled
+}
+input type:keyboard {
+    repeat_delay 300
+    repeat_rate 30
+}
+
+# ---- Shell on workspace 1 ----------------------------------------------------
+assign [app_id="^dos-shell$"] workspace number 1
+workspace number 1
+
+# ---- Keys --------------------------------------------------------------------
+# Back to the shell.
+bindsym $mod+Escape workspace number 1
+# Cycle shell and apps.
+bindsym Mod1+Tab workspace next
+bindsym Mod1+Shift+Tab workspace prev
+# Close the focused app (the shell comes back by itself if you close it).
+bindsym $mod+q kill
+# Toggle full screen, in case an app leaves it.
+bindsym $mod+f fullscreen toggle
+# Reload this config; leave the display for the text console.
+bindsym $mod+Shift+c reload
+bindsym $mod+Shift+e exit
+
+# Volume (PipeWire) and brightness; work on the lock screen too.
+bindsym --locked XF86AudioRaiseVolume exec wpctl set-volume -l 1.0 @DEFAULT_AUDIO_SINK@ 5%+
+bindsym --locked XF86AudioLowerVolume exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
+bindsym --locked XF86AudioMute exec wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
+bindsym --locked XF86AudioMicMute exec wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle
+# Media keys drive Spotify (or any MPRIS player).
+bindsym --locked XF86AudioPlay exec playerctl play-pause
+bindsym --locked XF86AudioPause exec playerctl play-pause
+bindsym --locked XF86AudioNext exec playerctl next
+bindsym --locked XF86AudioPrev exec playerctl previous
+bindsym --locked XF86MonBrightnessUp exec brightnessctl -q set 5%+
+bindsym --locked XF86MonBrightnessDown exec brightnessctl -q set 5%-
+
+# ---- Start -------------------------------------------------------------------
+# Arch's sway package puts the systemd/D-Bus environment import here
+# (needed by xdg-desktop-portal-wlr and PipeWire screen sharing).
+include /etc/sway/config.d/*
+
+exec /usr/local/bin/dos-sway-apps
+exec /usr/local/bin/dos-shell-loop
+exec kanshi
+
+include ~/.config/sway/config.d/*
