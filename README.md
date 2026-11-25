@@ -4,13 +4,16 @@ A fast, command-driven OS for the Lenovo ideapad 110-15ISK (i3-6006U, HD 520,
 8 GB, HDD). There's no desktop. It boots straight to the DOS Shell:
 
 ```
-DOS> chrome                 Google Chrome
-DOS> spotify                Spotify
-DOS> tlauncher              Minecraft (TLauncher)
-DOS> epic                   Epic Games library (Heroic) — GTA 5 story mode
-DOS> install vlc            apps from Arch, Debian, Ubuntu, Fedora or Flathub
-DOS> win install setup.exe  Windows apps (Wine)
-DOS> extend                 extend the display to the HDMI monitor
+DOS> help                       every command, with a one-line description
+DOS> chrome [url]  ·  web <words>   Google Chrome (hardware video decode)
+DOS> spotify  ·  play · pause · next · prev
+DOS> tlauncher  (or minecraft)  Minecraft through TLauncher, Java 8–25
+DOS> epic  (or games)           Epic library through Heroic + GE-Proton (GTA 5 story mode)
+DOS> install vlc                Arch / AUR
+DOS> install --debian <pkg>     also --ubuntu, --fedora, --arch, --flatpak; then: apps, remove
+DOS> win install setup.exe      Windows apps (Wine); win run · list · cmd · tricks · remove
+DOS> extend · single · external · screens   HDMI monitor layouts
+DOS> wifi · update · shutdown · reboot · sh
 ```
 
 DOS uses the Linux kernel for hardware support, and everything you see is DOS.
@@ -39,14 +42,18 @@ EFI partition.
 |------|------|-------|
 | 0 | Repo, CI, hardware check (`scripts/collect-info.sh`) | ✅ |
 | 0.5 | Speed base for the current Arch (`scripts/01-speed-base.sh`) | ready, dry run passed |
-| 1 | DOS live ISO built in CI with archiso (`scripts/build-iso.sh`) | in progress |
-| 2 | `dos-install`: DOS base on a chosen partition + GRUB entry | next |
-| 3 | Claude Code in the base, Remote Control on | next |
-| — | **Everything below ships as updates through Claude Code on the laptop** | |
-| 4 | DOS Shell (Rust): command prompt, app commands, `help` | planned |
-| 5 | Display (sway, no desktop) + HDMI extend | planned |
-| 6 | Apps: Chrome, Spotify, TLauncher, Heroic | planned |
-| 7 | `install` (Distrobox / Flatpak) and `win` (Wine) | planned |
+| 1 | DOS live ISO built in CI with archiso (`scripts/build-iso.sh`) | ✅ builds |
+| 2 | `dos-install`: DOS base on a chosen partition + GRUB entry | written, not run on hardware |
+| 3 | Claude Code in the base, `dos-update` | written, not run on hardware |
+| — | **Everything below ships as modules through `dos-update`** | |
+| 4 | DOS Shell (Rust) — [shell/](shell/) | ✅ 34 tests pass |
+| 5 | Display: sway, no desktop, HDMI extend — [DISPLAY](docs/DISPLAY.md) | written |
+| 6 | Chrome [·](docs/CHROME.md) Spotify [·](docs/SPOTIFY.md) TLauncher [·](docs/MINECRAFT.md) Epic/GTA 5 [·](docs/GAMES.md) | written |
+| 7 | `install` — [APPS](docs/APPS.md), `win` — [WINDOWS](docs/WINDOWS.md) | written |
+
+"Written" means checked with ShellCheck and CI but not yet run on the laptop.
+See [docs/MODULES.md](docs/MODULES.md) for how modules and commands fit
+together, and [docs/UPDATES.md](docs/UPDATES.md) for updates.
 
 ## How DOS is updated
 
