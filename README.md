@@ -14,7 +14,7 @@ GRUB boot menu
 
 ## What DOS includes
 
-- The LiteBox speed base: zram swap, BFQ on the HDD, Intel Vulkan and VA-API
+- The speed base (`scripts/01-speed-base.sh`): zram swap, BFQ on the HDD, Intel Vulkan and VA-API
   drivers, thermald, performance power profile.
 - A minimal sway session with no desktop. Type `chrome`, `spotify`,
   `minecraft` or `epic` and the app opens.
@@ -39,7 +39,8 @@ GRUB boot menu
 
 | Step | What | State |
 |------|------|-------|
-| 0 | Repo, plan, CI | ✅ |
+| 0 | Repo, plan, CI, hardware check (`scripts/collect-info.sh`) | ✅ |
+| 0.5 | Speed base for the laptop (`scripts/01-speed-base.sh`) | ready, dry run passed |
 | 1 | archiso profile that boots to a shell | planned |
 | 2 | ISO built in CI and attached to a release | planned |
 | 3 | `dos-install`: safe install to a chosen partition + GRUB entry | planned |
