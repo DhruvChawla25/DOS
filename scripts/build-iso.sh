@@ -48,14 +48,33 @@ sed -i \
   -e "s|^iso_version=.*|iso_version=\"${version}\"|" \
   "$profile/profiledef.sh"
 
-# Our own scripts in the live system must be executable.
-cat >> "$profile/profiledef.sh" <<'EOF'
-file_permissions+=(["/usr/local/bin/"]="0:0:755")
-EOF
+# Our own scripts in the live system must be executable. mkarchiso copies
+# airootfs with --no-preserve=mode (everything becomes 644), then applies
+# file_permissions; a key without a trailing "/" sets just that file.
+for f in "$repo"/iso/airootfs/usr/local/bin/*; do
+  printf 'file_permissions+=(["/usr/local/bin/%s"]="0:0:755")\n' "$(basename "$f")"
+done >> "$profile/profiledef.sh"
+
+# DOS_ISO_FAST=1 (CI builds that aren't releases): zstd squashfs instead of
+# releng's xz. Much faster to build, a little bigger, and faster to boot.
+if [[ ${DOS_ISO_FAST:-0} == 1 ]]; then
+  sed -i "s|^airootfs_image_tool_options=.*|airootfs_image_tool_options=('-comp' 'zstd' '-Xcompression-level' '6' '-b' '1M')|" \
+    "$profile/profiledef.sh"
+fi
 
 # Boot menu text: "Arch Linux install medium" -> "DOS live".
 grep -rlZ "Arch Linux install medium" "$profile/grub" "$profile/syslinux" "$profile/efiboot" 2>/dev/null \
   | xargs -0 -r sed -i "s/Arch Linux install medium/DOS live/g"
 
 mkarchiso -v -w "$work/work" -o "$out" "$profile"
+
+# Check the live root that went into the ISO (mkarchiso keeps it without -r).
+live_root="$work/work/x86_64/airootfs"
+for f in "$repo"/iso/airootfs/usr/local/bin/*; do
+  t="$live_root/usr/local/bin/$(basename "$f")"
+  [[ -x $t ]] || { echo "build-iso: $t is not executable in the ISO" >&2; exit 1; }
+done
+[[ -f $live_root/usr/share/dos/rootfs/etc/sudoers.d/10-wheel ]] \
+  || { echo "build-iso: DOS rootfs files missing from the ISO" >&2; exit 1; }
+echo "build-iso: dos-install is executable and the DOS rootfs is in the ISO."
 ls -lh "$out"
