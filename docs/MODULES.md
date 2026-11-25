@@ -17,7 +17,8 @@ tests/                      CI tests (Arch container, DOS_TEST=1)
 
 ## Module rules
 
-- Starts with `#!/usr/bin/env bash`, `set -euo pipefail`, and
+- Starts with `#!/usr/bin/env bash`, `set -euo pipefail`, then
+  `# shellcheck source=SCRIPTDIR/../../lib/dos.sh` on the line above
   `source "$(dirname "$0")/../../lib/dos.sh"`, then calls `dos_require_user`.
 - Uses `dos_pkg` (official repos) and `dos_aur` (AUR, via paru). Never runs
   `pacman -Syu` itself: dos-update does the full upgrade once, first.
@@ -31,11 +32,11 @@ Module numbers:
 
 | NN | Module | Owner |
 |----|--------|-------|
-| 10 | base-extras (pipewire, fonts, foot terminal, java) | display |
+| 10 | base-extras (pipewire, fonts, foot terminal) | display |
 | 20 | display (sway, kanshi, autostart shell) | display |
 | 30 | chrome | chrome |
 | 40 | spotify | spotify |
-| 50 | tlauncher | tlauncher |
+| 50 | tlauncher (+ Java 8/17/21/25) | tlauncher |
 | 60 | epic (Heroic + Proton + GameMode) | epic |
 | 70 | apps (Distrobox + Podman + Flatpak, `install` command) | apps |
 | 80 | windows (Wine, `win` command) | windows |
@@ -43,6 +44,9 @@ Module numbers:
 
 ## Command rules
 
+- The DOS Shell looks up a typed name as: built-in → `~/.local/share/dos/commands/`
+  (`DOS_USER_COMMANDS_DIR`, per-user wrappers from `install` and `win`) →
+  `/usr/local/share/dos/commands/` (`DOS_COMMANDS_DIR`) → anything on `PATH`.
 - `commands/<name>` is an executable script (bash) that the DOS Shell runs
   when you type `<name> [args]`. Modules install it to
   `/usr/local/share/dos/commands/` with `dos_command <name>`.
