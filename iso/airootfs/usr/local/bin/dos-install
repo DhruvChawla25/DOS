@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# dos-install — install the DOS base next to Windows 10 and Arch (triple boot).
+#
+#   dos-install --free /dev/sda    create a new DOS partition in the disk's largest free space
+#   dos-install /dev/sdaN          use an existing partition (it gets ERASED; you must type its name)
+#   dos-install --help
+#
+# Safety rules:
+#   * never touches the EFI partition except to write one small file, grub/custom.cfg
+#   * refuses NTFS (Windows / data), vfat (EFI), mounted partitions, and anything
+#     that looks like an existing Linux system
+#   * asks for the partition name to be typed before formatting
+set -euo pipefail
+
+ROOTFS=/usr/share/dos/rootfs
+MNT=/mnt/dos
+ESP_MNT=/mnt/dos-esp
+USER_NAME=dhruv
+HOSTNAME_DOS=dos
+TIMEZONE=Asia/Kolkata
+MIN_GB=40
+ESP_GUID=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+
+PACKAGES=(
+  base linux linux-firmware intel-ucode
+  networkmanager sudo nano git github-cli base-devel
+  zram-generator mesa vulkan-intel intel-media-driver libva-utils
+  thermald power-profiles-daemon
+)
+
+say()  { printf '\033[1;36m==>\033[0m %s\n' "$*" >&2; }
+fail() { printf '\033[1;31mdos-install:\033[0m %s\n' "$*" >&2; exit 1; }
+
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
+
+preflight() {
+  [[ $EUID -eq 0 ]] || fail "run as root (the live system logs you in as root)."
+  [[ -d /sys/firmware/efi ]] || fail "not booted in UEFI mode. Boot the pendrive's UEFI entry from F12."
+  curl -fsS --max-time 10 -o /dev/null https://archlinux.org \
+    || fail "no internet. Connect first: iwctl  (station wlan0 connect <wifi-name>)"
+}
+
+# part_of DISK NUMBER -> /dev/sda7 or /dev/nvme0n1p7
+part_of() { if [[ $1 =~ [0-9]$ ]]; then echo "${1}p$2"; else echo "$1$2"; fi; }
+
+create_free_partition() {
+  local disk="$1"
+  [[ -b $disk && $(lsblk -dno TYPE "$disk") == disk ]] || fail "$disk is not a disk."
+  local before after new
+  before=$(lsblk -nlo NAME "$disk" | sort)
+  # sgdisk: start 0 = start of the largest free block, end 0 = end of that block.
+  local free_sectors
+  free_sectors=$(sgdisk -p "$disk" | awk '/Total free space/ {print $5}')
+  local free_gb=$(( free_sectors * 512 / 1024 / 1024 / 1024 ))
+  (( free_gb >= MIN_GB )) || fail "only ${free_gb} GB free on $disk; DOS needs ${MIN_GB} GB.
+Make space first, for example in Windows: Disk Management → right-click a volume → Shrink Volume."
+  say "Creating a DOS partition in the largest free space on $disk (about ${free_gb} GB free in total)."
+  confirm_typed "$(basename "$disk")" "create a new partition on"
+  sgdisk -n 0:0:0 -t 0:8304 -c 0:DOS "$disk" >/dev/null
+  partprobe "$disk"; udevadm settle
+  after=$(lsblk -nlo NAME "$disk" | sort)
+  new=$(comm -13 <(echo "$before") <(echo "$after") | head -1)
+  [[ -n $new ]] || fail "could not find the new partition."
+  echo "/dev/$new"
+}
+
+check_existing_partition() {
+  local part="$1" fstype
+  [[ -b $part && $(lsblk -dno TYPE "$part") == part ]] || fail "$part is not a partition."
+  findmnt -S "$part" >/dev/null && fail "$part is mounted. Unmount it first."
+  [[ $(lsblk -dno PARTTYPE "$part") == "$ESP_GUID" ]] && fail "$part is the EFI partition. Refusing."
+  fstype=$(lsblk -dno FSTYPE "$part")
+  case "$fstype" in
+    ntfs|vfat|exfat|BitLocker) fail "$part is $fstype (Windows or data). Refusing." ;;
+  esac
+  if [[ $fstype == ext4 || $fstype == btrfs || $fstype == xfs ]]; then
+    local probe; probe=$(mktemp -d)
+    if mount -o ro "$part" "$probe" 2>/dev/null; then
+      if [[ -f $probe/etc/os-release ]]; then
+        local name
+        # shellcheck disable=SC1091
+        name=$(. "$probe/etc/os-release"; echo "${PRETTY_NAME:-Linux}")
+        umount "$probe"; rmdir "$probe"
+        fail "$part holds an installed system ($name). Refusing."
+      fi
+      umount "$probe"
+    fi
+    rmdir "$probe"
+  fi
+  say "$part will be ERASED:"
+  lsblk -o NAME,SIZE,FSTYPE,LABEL "$part"
+  confirm_typed "$(basename "$part")" "ERASE"
+}
+
+confirm_typed() {
+  local want="$1" verb="$2" got
+  read -r -p "Type '$want' to $verb it, anything else cancels: " got
+  [[ $got == "$want" ]] || fail "cancelled. Nothing was changed."
+}
+
+install_base() {
+  local part="$1"
+  say "Formatting $part as ext4 (label DOS)"
+  mkfs.ext4 -F -L DOS "$part" >/dev/null
+  mkdir -p "$MNT"
+  mount "$part" "$MNT"
+  trap 'umount -R "$MNT" 2>/dev/null || true' EXIT
+
+  say "Installing the DOS base (this takes a while on the HDD)"
+  pacstrap -K "$MNT" "${PACKAGES[@]}"
+  genfstab -U "$MNT" > "$MNT/etc/fstab"
+
+  say "Applying DOS settings"
+  cp -r "$ROOTFS/." "$MNT/"
+  chmod 0440 "$MNT/etc/sudoers.d/10-wheel"
+
+  echo "$HOSTNAME_DOS" > "$MNT/etc/hostname"
+  sed -i 's/^#en_US.UTF-8/en_US.UTF-8/' "$MNT/etc/locale.gen"
+  echo "LANG=en_US.UTF-8" > "$MNT/etc/locale.conf"
+  arch-chroot "$MNT" /bin/bash -euo pipefail -c "
+    ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+    hwclock --systohc
+    locale-gen >/dev/null
+    useradd -m -G wheel -s /bin/bash $USER_NAME
+    systemctl enable NetworkManager thermald power-profiles-daemon >/dev/null
+  "
+  # Performance profile on first boot (the laptop runs on mains, no battery).
+  mkdir -p "$MNT/etc/systemd/system/power-profiles-daemon.service.d"
+  printf '[Service]\nExecStartPost=/usr/bin/sh -c "sleep 2; powerprofilesctl set performance"\n' \
+    > "$MNT/etc/systemd/system/power-profiles-daemon.service.d/performance.conf"
+
+  say "Set the password for $USER_NAME (used for sudo)"
+  until arch-chroot "$MNT" passwd "$USER_NAME"; do echo "Try again."; done
+
+  say "Installing Claude Code for $USER_NAME"
+  if ! arch-chroot "$MNT" runuser -l "$USER_NAME" -c 'curl -fsSL https://claude.ai/install.sh | bash'; then
+    echo "Claude Code install failed; DOS will show the command to retry on first boot."
+  fi
+}
+
+add_boot_entry() {
+  local part="$1" uuid esp
+  uuid=$(blkid -s UUID -o value "$part")
+  esp=$(lsblk -nlpo NAME,PARTTYPE | awk -v g="$ESP_GUID" '$2==g {print $1; exit}')
+  [[ -n $esp ]] || fail "no EFI partition found."
+  mkdir -p "$ESP_MNT"
+  mount "$esp" "$ESP_MNT"
+  local grubdir="$ESP_MNT/grub"
+  if [[ ! -f $grubdir/grub.cfg ]]; then
+    umount "$ESP_MNT"
+    fail "GRUB not found on $esp. DOS is installed but has no boot entry yet."
+  fi
+  say "Adding DOS to the boot menu ($esp: grub/custom.cfg)"
+  cat > "$grubdir/custom.cfg" <<EOF
+# Added by dos-install. Arch's grub-mkconfig keeps this file (41_custom).
+menuentry "DOS" --class dos {
+    insmod part_gpt
+    insmod ext2
+    search --no-floppy --fs-uuid --set=root $uuid
+    linux /boot/vmlinuz-linux root=UUID=$uuid rw quiet loglevel=3
+    initrd /boot/intel-ucode.img /boot/initramfs-linux.img
+}
+EOF
+  if ! grep -q custom.cfg "$grubdir/grub.cfg"; then
+    echo "Note: this grub.cfg doesn't load custom.cfg yet. Boot Arch once and run:"
+    echo "  sudo grub-mkconfig -o /boot/grub/grub.cfg"
+  fi
+  umount "$ESP_MNT"
+}
+
+main() {
+  case "${1:-}" in
+    -h|--help|"") usage; exit 0 ;;
+  esac
+  preflight
+  lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS
+  local part
+  if [[ $1 == --free ]]; then
+    [[ -n ${2:-} ]] || fail "usage: dos-install --free /dev/sda"
+    part=$(create_free_partition "$2")
+  else
+    part="$1"
+    check_existing_partition "$part"
+  fi
+  install_base "$part"
+  add_boot_entry "$part"
+  say "DOS is installed. Remove the pendrive and reboot, then pick DOS in the menu."
+}
+
+main "$@"

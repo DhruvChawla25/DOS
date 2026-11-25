@@ -1,50 +1,68 @@
 # DOS — Dhruv's Operating System
 
-A light, Arch-based OS for the Lenovo ideapad 110-15ISK (i3-6006U, HD 520, 8 GB,
-HDD). It ships as a single `.iso` file. Flash it to a pendrive with
-balenaEtcher, boot from it, and it installs DOS next to Windows 10 and the
-existing Arch. That gives a **triple boot**:
+A fast, command-driven OS for the Lenovo ideapad 110-15ISK (i3-6006U, HD 520,
+8 GB, HDD). There's no desktop. It boots straight to the DOS Shell:
+
+```
+DOS> chrome                 Google Chrome
+DOS> spotify                Spotify
+DOS> tlauncher              Minecraft (TLauncher)
+DOS> epic                   Epic Games library (Heroic) — GTA 5 story mode
+DOS> install vlc            apps from Arch, Debian, Ubuntu, Fedora or Flathub
+DOS> win install setup.exe  Windows apps (Wine)
+DOS> extend                 extend the display to the HDMI monitor
+```
+
+DOS uses the Linux kernel for hardware support, and everything you see is DOS.
+See [docs/DESIGN.md](docs/DESIGN.md).
+
+## Triple boot from a pendrive
+
+DOS ships as a single `.iso`. Flash it with balenaEtcher, boot from it (F12 on
+the ideapad), and run `dos-install`. It installs DOS next to the existing
+systems:
 
 ```
 GRUB boot menu
-├── DOS              ← new: sway, type-a-word app launcher, tuned for this laptop
-├── Arch Linux       ← existing install (XFCE)
-└── Windows 10       ← existing install
+├── DOS
+├── Arch Linux   (existing)
+└── Windows 10   (existing)
 ```
 
-## What DOS includes
-
-- The LiteBox speed base: zram swap, BFQ on the HDD, Intel Vulkan and VA-API
-  drivers, thermald, performance power profile.
-- A minimal sway session with no desktop. Type `chrome`, `spotify`,
-  `minecraft` or `epic` and the app opens.
-- Extended display over HDMI, with automatic monitor profiles (kanshi).
-- Apps: Google Chrome, Spotify, Prism Launcher (Minecraft) and Heroic Games
-  Launcher (Epic). Chrome and Spotify don't allow redistribution, so the
-  installer downloads them from their official sources during setup instead of
-  packing them into the ISO.
-
-## How it works
-
-1. **Build:** GitHub Actions builds the ISO with `archiso` inside an Arch Linux
-   container, and attaches it to a GitHub Release.
-2. **Flash:** download `DOS-<version>-x86_64.iso` and write it to the pendrive
-   with balenaEtcher.
-3. **Install:** boot the pendrive (F12 on the ideapad for the boot menu) and run
-   `dos-install`. It shows the disk layout, installs only to the partition you
-   confirm, and adds DOS to the existing GRUB menu. It never formats Windows or
-   any partition you didn't pick.
+The installer only writes to the partition you confirm. It never formats
+Windows or any partition you didn't pick, and it puts nothing on the nearly full
+EFI partition.
 
 ## Status
 
 | Step | What | State |
 |------|------|-------|
-| 0 | Repo, plan, CI | ✅ |
-| 1 | archiso profile that boots to a shell | planned |
-| 2 | ISO built in CI and attached to a release | planned |
-| 3 | `dos-install`: safe install to a chosen partition + GRUB entry | planned |
-| 4 | Speed base + sway session + launcher | planned |
-| 5 | Apps + extended display | planned |
+| 0 | Repo, CI, hardware check (`scripts/collect-info.sh`) | ✅ |
+| 0.5 | Speed base for the current Arch (`scripts/01-speed-base.sh`) | ready, dry run passed |
+| 1 | DOS live ISO built in CI with archiso (`scripts/build-iso.sh`) | in progress |
+| 2 | `dos-install`: DOS base on a chosen partition + GRUB entry | next |
+| 3 | Claude Code in the base, Remote Control on | next |
+| — | **Everything below ships as updates through Claude Code on the laptop** | |
+| 4 | DOS Shell (Rust): command prompt, app commands, `help` | planned |
+| 5 | Display (sway, no desktop) + HDMI extend | planned |
+| 6 | Apps: Chrome, Spotify, TLauncher, Heroic | planned |
+| 7 | `install` (Distrobox / Flatpak) and `win` (Wine) | planned |
+
+## How DOS is updated
+
+The ISO only installs a small **DOS base**: kernel, drivers, network, speed
+tuning and Claude Code. Every later feature is built on the laptop itself by
+Claude Code, which is driven over Remote Control and commits each change to this
+repo. That avoids rebuilding and reflashing the pendrive for every change.
+
+## Build the ISO yourself (on Arch)
+
+```bash
+sudo pacman -S archiso
+sudo bash scripts/build-iso.sh   # ISO in out/
+```
+
+Version tags (`v0.1.0`) are built by GitHub Actions and attached to a release.
 
 ## License
 
