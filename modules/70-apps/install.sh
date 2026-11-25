@@ -2,7 +2,7 @@
 # 70-apps: run apps from other distros (Distrobox on rootless Podman) and
 # from Flathub (Flatpak, per-user). Installs the install, remove and apps commands.
 set -euo pipefail
-# shellcheck source=../../lib/dos.sh
+# shellcheck source=SCRIPTDIR/../../lib/dos.sh
 source "$(dirname "$0")/../../lib/dos.sh"
 dos_require_user
 
