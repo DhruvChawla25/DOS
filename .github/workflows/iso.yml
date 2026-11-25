@@ -38,6 +38,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           gh release create "$GITHUB_REF_NAME" out/*.iso --repo "$GITHUB_REPOSITORY" \
             --title "DOS $GITHUB_REF_NAME" --notes "Flash with balenaEtcher, boot with F12."
