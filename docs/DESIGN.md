@@ -81,7 +81,7 @@ The pendrive installs only the **DOS base**:
 | Speed | zram-generator, BFQ rule, sysctl tuning, thermald, power-profiles-daemon (performance) |
 | Graphics | mesa, vulkan-intel, intel-media-driver |
 | User | `dhruv` with sudo, autologin on tty1 |
-| Tools | git, github-cli, base-devel, nodejs (for tooling) |
+| Tools | git, github-cli, base-devel, nano |
 | Claude Code | native installer, run on first boot as `dhruv` |
 
 On first boot, DOS prints a short welcome: connect Wi-Fi (`nmtui`), run

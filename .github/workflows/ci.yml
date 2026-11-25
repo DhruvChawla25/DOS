@@ -10,4 +10,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: ShellCheck
-        run: find . -name '*.sh' -not -path './.git/*' -print0 | xargs -0 -r shellcheck -x
+        run: { find . -name '*.sh' -not -path './.git/*' -print0; printf '%s\0' iso/airootfs/usr/local/bin/*; } | xargs -0 -r shellcheck -x
