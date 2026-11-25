@@ -100,6 +100,7 @@ flatpak_pick() {
 install_flatpak() {
   local what=$1 name=$2 id title
   if is_app_id "$what"; then id=$what; else id=$(flatpak_pick "$what"); fi
+  [[ -z $name ]] || apps_check_name "$name" flatpak "$id"
   dos_log "Installing $id from Flathub"
   flatpak install --user --noninteractive -y flathub "$id" || dos_die "could not install $id from Flathub"
   if [[ -z $name ]]; then
