@@ -203,6 +203,8 @@ has "prints the pacstrap step"         "[dry-run] pacstrap -K /mnt/dos"
 has "finds GRUB on the fake ESP"       "GRUB found on $(p 1)"
 has "prints the GRUB entry"            'menuentry "DOS" --class dos'
 has "asks for confirmation (dry)"      "would ask you to type '$(basename "$(p 5)")'"
+has "warns when there's no room for games" "games like GTA 5 need 125+ GB"
+has "prints the multilib step"         "[dry-run] sed -i -E"
 
 echo "Dry run with --free"
 MIN=40 di --dry-run --free "$disk"

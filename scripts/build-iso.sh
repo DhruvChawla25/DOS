@@ -54,6 +54,9 @@ sed -i \
 for f in "$repo"/iso/airootfs/usr/local/bin/*; do
   printf 'file_permissions+=(["/usr/local/bin/%s"]="0:0:755")\n' "$(basename "$f")"
 done >> "$profile/profiledef.sh"
+# The DOS rootfs copied onto the installed system: its bin dir (dos-update)
+# too. Trailing "/" = recursive.
+echo 'file_permissions+=(["/usr/share/dos/rootfs/usr/local/bin/"]="0:0:755")' >> "$profile/profiledef.sh"
 
 # DOS_ISO_FAST=1 (CI builds that aren't releases): zstd squashfs instead of
 # releng's xz. Much faster to build, a little bigger, and faster to boot.
@@ -74,7 +77,11 @@ for f in "$repo"/iso/airootfs/usr/local/bin/*; do
   t="$live_root/usr/local/bin/$(basename "$f")"
   [[ -x $t ]] || { echo "build-iso: $t is not executable in the ISO" >&2; exit 1; }
 done
+for f in "$repo"/iso/airootfs/usr/share/dos/rootfs/usr/local/bin/*; do
+  t="$live_root/usr/share/dos/rootfs/usr/local/bin/$(basename "$f")"
+  [[ -x $t ]] || { echo "build-iso: $t is not executable in the ISO" >&2; exit 1; }
+done
 [[ -f $live_root/usr/share/dos/rootfs/etc/sudoers.d/10-wheel ]] \
   || { echo "build-iso: DOS rootfs files missing from the ISO" >&2; exit 1; }
-echo "build-iso: dos-install is executable and the DOS rootfs is in the ISO."
+echo "build-iso: dos-install and dos-update are executable and the DOS rootfs is in the ISO."
 ls -lh "$out"
