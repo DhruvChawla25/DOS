@@ -61,7 +61,7 @@ conf_get() {
 wine_env() {
   export WINEPREFIX="$1"
   export WINEARCH=win64            # one 64-bit (new WoW64) prefix runs 32- and 64-bit apps
-  export WINEDEBUG=-all            # debug output costs CPU and HDD writes
+  export WINEDEBUG="${WINEDEBUG:--all}"   # debug output costs CPU and HDD writes
   export DXVK_LOG_LEVEL=none       # only matters in prefixes that opted into DXVK
   # No .desktop files, menus or file associations leaking out of the prefix:
   # DOS has no desktop, and `win install` writes the DOS command itself.
@@ -101,7 +101,8 @@ launch() {
   [[ $SELF =~ ^[A-Za-z0-9/._-]+$ ]] || die "the win command lives in a path with odd characters: $SELF"
   local run_dir="${XDG_RUNTIME_DIR:-/tmp}" file
   file="$(mktemp "$run_dir/dos-win.XXXXXXXX")"
-  printf '%s\0' "$@" > "$file"
+  # Element 0 carries WINEDEBUG across sway, which doesn't pass our environment.
+  printf '%s\0' "${WINEDEBUG:--all}" "$@" > "$file"
   if [[ $mode == tty ]]; then
     command -v foot >/dev/null 2>&1 || { rm -f "$file"; die "the foot terminal isn't installed"; }
     swaymsg -q exec -- foot --app-id=dos-win-cmd -- "$SELF" _start tty "$file" \
@@ -118,8 +119,9 @@ cmd_start() {
   [[ -f $file ]] || exit 1
   mapfile -d '' -t argv < "$file"
   rm -f "$file"
-  local prefix="${argv[0]}" workdir="${argv[1]}" name
-  argv=("${argv[@]:2}")
+  local prefix="${argv[1]}" workdir="${argv[2]}" name
+  export WINEDEBUG="${argv[0]}"
+  argv=("${argv[@]:3}")
   wine_env "$prefix"
   cd "$workdir" 2>/dev/null || cd "$prefix/drive_c"
   if [[ $mode == tty ]]; then
