@@ -34,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install disk tools
-        run: pacman -Syu --noconfirm --needed gptfdisk dosfstools ntfs-3g e2fsprogs util-linux
+        run: pacman -Syu --noconfirm --needed gptfdisk dosfstools ntfs-3g ntfsprogs e2fsprogs util-linux
       - name: Refusals and --dry-run on fake disks
         run: bash tests/install-safety.sh
 
