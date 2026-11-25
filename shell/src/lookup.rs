@@ -57,13 +57,17 @@ impl Dirs {
             .chain([self.system.as_path()])
     }
 
-    /// `PATH` with the DOS command dirs in front, for children that run
-    /// through bash (so `chrome | ...` still finds DOS commands).
+    /// `PATH` with the DOS command dirs at the END, for children that run
+    /// through bash (so `apps | grep x` still finds DOS commands). They must not
+    /// come first: DOS has commands like `install` that would shadow system
+    /// tools (`/usr/bin/install`) for every program the child starts, such as
+    /// makepkg during an AUR build.
     pub fn child_path(&self) -> OsString {
-        let mut parts: Vec<PathBuf> = self.command_dirs().map(Path::to_path_buf).collect();
+        let mut parts: Vec<PathBuf> = Vec::new();
         if let Some(p) = &self.path {
             parts.extend(std::env::split_paths(p));
         }
+        parts.extend(self.command_dirs().map(Path::to_path_buf));
         std::env::join_paths(parts).unwrap_or_else(|_| self.path.clone().unwrap_or_default())
     }
 }
@@ -309,10 +313,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn child_path_puts_command_dirs_first() {
+    fn child_path_puts_command_dirs_last() {
         let f = fixture();
         let joined = f.dirs.child_path();
         let parts: Vec<PathBuf> = std::env::split_paths(&joined).collect();
-        assert_eq!(parts, [f.user.clone(), f.system.clone(), f.bin.clone()]);
+        assert_eq!(parts, [f.bin.clone(), f.user.clone(), f.system.clone()]);
     }
 }
