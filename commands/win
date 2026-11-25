@@ -1,0 +1,407 @@
+#!/usr/bin/env bash
+# help: win install|run|list|remove|tricks|cmd|config  Windows apps (Wine)
+#
+# Every Windows app gets its own 64-bit Wine prefix in
+# ~/.local/share/dos/wine/<name>, so one broken app can't break another, and
+# `win remove` deletes it cleanly. See docs/WINDOWS.md.
+set -euo pipefail
+
+WIN_ROOT="${DOS_WINE_DIR:-$HOME/.local/share/dos/wine}"
+USER_COMMANDS="$HOME/.local/share/dos/commands"
+SYSTEM_COMMANDS="/usr/local/share/dos/commands"
+LOG_DIR="$HOME/.local/state/dos/wine"
+DEFAULT_PREFIX="$WIN_ROOT/.default"   # for `win cmd` and `win run file.exe`
+SELF="$(readlink -f "$0")"
+APP_MARK="(Windows app)"              # the help line of wrappers we write
+
+die()  { printf 'win: %s\n' "$*" >&2; exit 1; }
+say()  { printf '%s\n' "$*"; }
+warn() { printf 'win: %s\n' "$*" >&2; }
+
+usage() {
+  cat <<'EOF'
+win install <setup.exe|setup.msi> [name]   install a Windows app in its own prefix
+win run <name|file.exe> [args...]          start an installed app or an .exe
+win list                                   list installed Windows apps
+win remove <name>                          delete an app and its prefix
+win tricks <name> <verbs...>               winetricks for that app (e.g. corefonts, vcrun2022, dxvk)
+win cmd [name]                             Windows command prompt (wine cmd)
+win config <name>                          Wine settings for that app (winecfg)
+EOF
+}
+
+# ---------------------------------------------------------------- helpers
+
+need_wine() {
+  command -v wine >/dev/null 2>&1 || die "Wine isn't installed: run dos-update"
+}
+
+need_display() {
+  [[ -n ${SWAYSOCK:-} ]] || die "start the display first"
+}
+
+valid_name() {
+  [[ $1 =~ ^[a-z0-9][a-z0-9._-]{0,39}$ ]]
+}
+
+prefix_of() { printf '%s/%s' "$WIN_ROOT" "$1"; }
+conf_of()   { printf '%s/%s/dos-app.conf' "$WIN_ROOT" "$1"; }
+installed() { valid_name "$1" && [[ -f $(conf_of "$1") ]]; }
+
+# conf_get FILE KEY — read KEY=value from a dos-app.conf without sourcing it.
+conf_get() {
+  local k v
+  while IFS='=' read -r k v; do
+    [[ $k == "$2" ]] && { printf '%s' "$v"; return 0; }
+  done < "$1"
+  return 1
+}
+
+# Performance and hygiene defaults for every Wine process DOS starts.
+wine_env() {
+  export WINEPREFIX="$1"
+  export WINEARCH=win64            # one 64-bit (new WoW64) prefix runs 32- and 64-bit apps
+  export WINEDEBUG=-all            # debug output costs CPU and HDD writes
+  export DXVK_LOG_LEVEL=none       # only matters in prefixes that opted into DXVK
+  # No .desktop files, menus or file associations leaking out of the prefix:
+  # DOS has no desktop, and `win install` writes the DOS command itself.
+  export WINEDLLOVERRIDES="winemenubuilder.exe=d${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
+  # Mainline Wine 11 has no esync/fsync; it uses the kernel's NTSync
+  # (/dev/ntsync, loaded by ntsync-autoload) on its own. Nothing to set.
+}
+
+# make_prefix DIR — create a prefix if needed (offline: mono/gecko are packaged).
+make_prefix() {
+  local dir="$1"
+  [[ -f $dir/system.reg ]] && return 0
+  say "Creating a Wine prefix in $dir (first time takes a minute on the HDD)..."
+  mkdir -p "$dir"
+  ( wine_env "$dir"; wineboot --init >/dev/null 2>&1; wineserver -w ) \
+    || die "couldn't create the Wine prefix in $dir"
+}
+
+# Core fonts (Arial, Times, Verdana, ...) at first use, per prefix. winetricks
+# caches the downloads in ~/.cache/winetricks, so later apps install offline.
+add_fonts() {
+  local dir="$1"
+  [[ -f $dir/.dos-fonts ]] && return 0
+  say "Adding Windows core fonts (winetricks corefonts)..."
+  if ( wine_env "$dir"; winetricks -q corefonts >/dev/null 2>&1 ); then
+    : > "$dir/.dos-fonts"
+  else
+    warn "couldn't add core fonts (offline?); later: win tricks <name> corefonts"
+  fi
+}
+
+# launch TTY|LOG PREFIX WORKDIR CMD... — run CMD in PREFIX, detached under sway.
+# sway runs `exec` through sh -c, so instead of quoting paths for it, the full
+# command goes into a NUL-separated file and sway only ever sees two plain words.
+launch() {
+  local mode="$1"; shift
+  [[ $SELF =~ ^[A-Za-z0-9/._-]+$ ]] || die "the win command lives in a path with odd characters: $SELF"
+  local run_dir="${XDG_RUNTIME_DIR:-/tmp}" file
+  file="$(mktemp "$run_dir/dos-win.XXXXXXXX")"
+  printf '%s\0' "$@" > "$file"
+  if [[ $mode == tty ]]; then
+    command -v foot >/dev/null 2>&1 || { rm -f "$file"; die "the foot terminal isn't installed"; }
+    swaymsg -q exec -- foot --app-id=dos-win-cmd -- "$SELF" _start tty "$file" \
+      || { rm -f "$file"; die "sway didn't start the command prompt"; }
+  else
+    swaymsg -q exec -- "$SELF" _start log "$file" \
+      || { rm -f "$file"; die "sway didn't start the app"; }
+  fi
+}
+
+# Internal: the far side of launch(). Runs inside sway (or foot).
+cmd_start() {
+  local mode="$1" file="$2" argv=()
+  [[ -f $file ]] || exit 1
+  mapfile -d '' -t argv < "$file"
+  rm -f "$file"
+  local prefix="${argv[0]}" workdir="${argv[1]}" name
+  argv=("${argv[@]:2}")
+  wine_env "$prefix"
+  cd "$workdir" 2>/dev/null || cd "$prefix/drive_c"
+  if [[ $mode == tty ]]; then
+    exec "${argv[@]}"
+  fi
+  name="$(basename "$prefix")"
+  mkdir -p "$LOG_DIR"
+  exec "${argv[@]}" >"$LOG_DIR/${name#.}.log" 2>&1 </dev/null
+}
+
+# Is $1 a DOS command file that `win install` wrote?
+is_our_wrapper() {
+  [[ -f $1 ]] && sed -n 2p "$1" | grep -qF "$APP_MARK"
+}
+
+# candidates PREFIX MARKER — installed programs newer than MARKER, newest first,
+# as NUL-separated paths. Start-menu / desktop shortcuts first (they carry the
+# right working directory and arguments), then .exe files in Program Files.
+candidates() {
+  local p="$1" marker="$2" skip='(unins|uninst|setup|install|update|updater|crash|report|helper|redist|vcredist|dxsetup|readme|license|repair)'
+  local -a lnk_dirs=() exe_dirs=() d
+  for d in "$p/drive_c/ProgramData/Microsoft/Windows/Start Menu" \
+           "$p/drive_c/users/Public/Desktop" \
+           "$p"/drive_c/users/*/Desktop \
+           "$p"/drive_c/users/*/AppData/Roaming/Microsoft/Windows/"Start Menu"; do
+    [[ -d $d && ! -L $d ]] && lnk_dirs+=("$d")
+  done
+  for d in "$p/drive_c/Program Files" "$p/drive_c/Program Files (x86)"; do
+    [[ -d $d ]] && exe_dirs+=("$d")
+  done
+  {
+    if (( ${#lnk_dirs[@]} )); then
+      find "${lnk_dirs[@]}" -type f -iname '*.lnk' -newer "$marker" -printf '%T@\t%p\0' | sort -z -rn
+    fi
+    if (( ${#exe_dirs[@]} )); then
+      find "${exe_dirs[@]}" -type f -iname '*.exe' -newer "$marker" -printf '%T@\t%p\0' | sort -z -rn
+    fi
+  } | while IFS=$'\t' read -r -d '' _ path; do
+    base="$(basename "$path")"
+    [[ ${base,,} =~ $skip ]] && continue
+    printf '%s\0' "$path"
+  done
+}
+
+# pick_program PREFIX MARKER — print the chosen program (unix path) or nothing.
+pick_program() {
+  local -a found=()
+  mapfile -d '' -t found < <(candidates "$1" "$2")
+  (( ${#found[@]} )) || return 0
+  if [[ ! -t 0 ]]; then printf '%s' "${found[0]}"; return 0; fi
+  local n=${#found[@]} i ans
+  (( n > 15 )) && n=15
+  if (( n == 1 )); then
+    read -rp "Start this program for the app: ${found[0]#"$1/drive_c/"} [Y/n] " ans
+    [[ ${ans,,} == n* ]] || printf '%s' "${found[0]}"
+    return 0
+  fi
+  say "Programs the installer added (newest first):" >&2
+  for (( i = 0; i < n; i++ )); do
+    printf '  %2d) %s\n' $((i + 1)) "${found[i]#"$1/drive_c/"}" >&2
+  done
+  while :; do
+    read -rp "Which one starts the app? [1-$n, Enter = 1, q = none] " ans
+    ans="${ans:-1}"
+    [[ $ans == q ]] && return 0
+    if [[ $ans =~ ^[0-9]+$ ]] && (( ans >= 1 && ans <= n )); then
+      printf '%s' "${found[ans - 1]}"; return 0
+    fi
+  done
+}
+
+default_name() {
+  local n
+  n="$(basename "$1")"; n="${n%.*}"; n="${n,,}"
+  # "Notepad++ 8.6.4 Installer x64.exe" -> notepad (the word pass runs twice
+  # because neighbouring words share a dash).
+  local words='s/(^|-)(setup|installer|install|x64|x86|win64|win32|amd64|full|offline)(-|$)/\1\3/g'
+  n="$(sed -E "s/[^a-z0-9]+/-/g; $words; $words; s/-+/-/g; s/-v?[0-9][0-9.-]*\$//; s/^-|-\$//g" <<<"$n")"
+  printf '%s' "${n:0:40}"
+}
+
+# ---------------------------------------------------------------- subcommands
+
+cmd_install() {
+  (( $# >= 1 && $# <= 2 )) || die "usage: win install <setup.exe|setup.msi> [name]"
+  need_wine; need_display
+  local setup name ans
+  setup="$(readlink -f "$1" 2>/dev/null)" || die "no such file: $1"
+  [[ -f $setup ]] || die "no such file: $1"
+  case "${setup,,}" in *.exe|*.msi) ;; *) die "not an .exe or .msi: $1" ;; esac
+
+  name="${2:-}"
+  if [[ -z $name ]]; then
+    name="$(default_name "$setup")"
+    if [[ -t 0 ]]; then
+      read -rp "Command name for this app [${name:-?}]: " ans
+      name="${ans:-$name}"
+    fi
+  fi
+  name="${name,,}"
+  valid_name "$name" || die "bad name '$name': use a-z, 0-9, . _ - (up to 40, starting with a letter or digit)"
+  case "$name" in win|help|exit|quit|install|cd|ls) die "'$name' is reserved in DOS: pick another name" ;; esac
+  [[ -e $SYSTEM_COMMANDS/$name ]] && die "'$name' is already a DOS command: pick another name"
+  if [[ -e $USER_COMMANDS/$name ]] && ! is_our_wrapper "$USER_COMMANDS/$name"; then
+    die "'$name' is already one of your DOS commands: pick another name"
+  fi
+  local prefix; prefix="$(prefix_of "$name")"
+  if [[ -f $prefix/dos-app.conf ]]; then
+    [[ -t 0 ]] || die "'$name' is already installed (win remove $name first)"
+    read -rp "'$name' is already installed. Run this installer in the same prefix (update)? [y/N] " ans
+    [[ ${ans,,} == y* ]] || die "cancelled"
+  fi
+
+  make_prefix "$prefix"
+  add_fonts "$prefix"
+
+  local marker="$prefix/.dos-install-marker"
+  : > "$marker"
+  sleep 1   # mtime granularity: anything the installer writes is strictly newer
+  say "Running the installer. Finish it in its window; DOS waits until it closes."
+  local rc=0
+  (
+    wine_env "$prefix"
+    cd "$(dirname "$setup")"
+    if [[ ${setup,,} == *.msi ]]; then wine msiexec /i "$setup"; else wine "$setup"; fi
+    wineserver -w   # installers often start a second process and exit early
+  ) >"$prefix/.dos-install.log" 2>&1 || rc=$?
+  (( rc == 0 )) || warn "the installer exited with code $rc (log: $prefix/.dos-install.log)"
+
+  local exe
+  exe="$(pick_program "$prefix" "$marker")"
+  rm -f "$marker"
+  if [[ -z $exe ]]; then
+    # Nothing installed: maybe it was a portable app, not an installer.
+    if [[ ${setup,,} == *.exe && -t 0 ]]; then
+      read -rp "No installed program found. Use $(basename "$setup") itself as the app (portable)? [y/N] " ans
+      if [[ ${ans,,} == y* ]]; then
+        mkdir -p "$prefix/drive_c/Program Files/$name"
+        cp -- "$setup" "$prefix/drive_c/Program Files/$name/"
+        exe="$prefix/drive_c/Program Files/$name/$(basename "$setup")"
+      fi
+    fi
+    [[ -n $exe ]] || die "no program chosen; the prefix stays in $prefix (win remove $name to delete it)"
+  fi
+
+  {
+    printf '# DOS Windows app. EXE is a .exe or .lnk inside this prefix.\n'
+    printf 'NAME=%s\n' "$name"
+    printf 'EXE=%s\n' "$exe"
+    printf 'INSTALLED=%s\n' "$(date -Is)"
+    printf '# GAMEMODE=1 starts the app under gamemoderun (if installed).\n'
+  } > "$prefix/dos-app.conf"
+
+  mkdir -p "$USER_COMMANDS"
+  printf '#!/usr/bin/env bash\n# help: %s %s\nexec %s run %s "$@"\n' \
+    "$name" "$APP_MARK" "$SELF" "$name" > "$USER_COMMANDS/$name"
+  chmod 755 "$USER_COMMANDS/$name"
+  say "Installed. Type '$name' at DOS> to start it."
+}
+
+cmd_run() {
+  (( $# >= 1 )) || die "usage: win run <name|file.exe> [args...]"
+  need_wine; need_display
+  local target="$1"; shift
+  local prefix exe workdir gamemode="" path
+  local -a argv
+
+  if installed "$target"; then
+    prefix="$(prefix_of "$target")"
+    exe="$(conf_get "$(conf_of "$target")" EXE)" || die "$target: no EXE in dos-app.conf"
+    [[ $(conf_get "$(conf_of "$target")" GAMEMODE || true) == 1 ]] && gamemode=1
+    [[ -f $exe ]] || die "$target: program is gone: $exe (reinstall with win install)"
+  else
+    path="$(readlink -f "$target" 2>/dev/null)" || die "no app or file called '$target' (see: win list)"
+    [[ -f $path ]] || die "no app or file called '$target' (see: win list)"
+    case "${path,,}" in *.exe|*.lnk|*.msi|*.bat) ;; *) die "not a Windows program: $target" ;; esac
+    exe="$path"
+    # A file inside an app's prefix runs in that prefix; anything else in the shared one.
+    if [[ $path == "$WIN_ROOT"/*/drive_c/* ]]; then
+      prefix="${path%%/drive_c/*}"
+    else
+      prefix="$DEFAULT_PREFIX"
+      make_prefix "$prefix"
+    fi
+  fi
+
+  case "${exe,,}" in
+    *.lnk)       argv=(wine start /unix "$exe" "$@"); workdir="$prefix/drive_c" ;;
+    *.msi)       argv=(wine msiexec /i "$exe" "$@"); workdir="$(dirname "$exe")" ;;
+    *.bat)       argv=(wine cmd /c "$exe" "$@"); workdir="$(dirname "$exe")" ;;
+    *)           argv=(wine "$exe" "$@"); workdir="$(dirname "$exe")" ;;
+  esac
+  [[ -n $gamemode ]] && command -v gamemoderun >/dev/null 2>&1 && argv=(gamemoderun "${argv[@]}")
+  launch log "$prefix" "$workdir" "${argv[@]}"
+}
+
+cmd_list() {
+  local conf name exe any=0
+  shopt -s nullglob
+  for conf in "$WIN_ROOT"/*/dos-app.conf; do
+    name="$(basename "$(dirname "$conf")")"
+    exe="$(conf_get "$conf" EXE || true)"
+    printf '%-20s %s\n' "$name" "${exe#"$WIN_ROOT/$name/drive_c/"}"
+    any=1
+  done
+  (( any )) || say "No Windows apps yet. Install one with: win install setup.exe"
+}
+
+cmd_remove() {
+  (( $# == 1 )) || die "usage: win remove <name>"
+  local name="$1" prefix ans
+  valid_name "$name" || die "bad name: $name"
+  prefix="$(prefix_of "$name")"
+  [[ -d $prefix ]] || die "no Windows app called '$name' (see: win list)"
+  [[ -t 0 ]] || die "win remove needs you to type the name to confirm"
+  local size; size="$(du -sh "$prefix" 2>/dev/null | cut -f1)"
+  say "This deletes '$name' and everything in its prefix (${size:-?}): $prefix"
+  read -rp "Type the name to confirm: " ans
+  [[ $ans == "$name" ]] || die "cancelled"
+  if command -v wineserver >/dev/null 2>&1; then
+    ( wine_env "$prefix"; wineserver -k >/dev/null 2>&1 || true; wineserver -w >/dev/null 2>&1 || true )
+  fi
+  # rm doesn't follow the prefix's symlinks (dosdevices/z: -> /, Documents -> ~).
+  rm -rf --one-file-system -- "$prefix"
+  is_our_wrapper "$USER_COMMANDS/$name" && rm -f -- "$USER_COMMANDS/$name"
+  rm -f -- "$LOG_DIR/$name.log"
+  say "Removed $name."
+}
+
+cmd_tricks() {
+  (( $# >= 2 )) || die "usage: win tricks <name> <verbs...>  (e.g. corefonts vcrun2022 dotnet48 dxvk)"
+  need_wine
+  command -v winetricks >/dev/null 2>&1 || die "winetricks isn't installed: run dos-update"
+  local name="$1"; shift
+  installed "$name" || die "no Windows app called '$name' (see: win list)"
+  local prefix; prefix="$(prefix_of "$name")"
+  ( wine_env "$prefix"; winetricks -q "$@" ) || die "winetricks failed for $name: $*"
+  [[ " $* " == *" corefonts "* ]] && : > "$prefix/.dos-fonts"
+  say "Done: $* in $name."
+}
+
+cmd_cmd() {
+  (( $# <= 1 )) || die "usage: win cmd [name]"
+  need_wine
+  local prefix
+  if (( $# == 1 )); then
+    installed "$1" || die "no Windows app called '$1' (see: win list)"
+    prefix="$(prefix_of "$1")"
+  else
+    prefix="$DEFAULT_PREFIX"
+    make_prefix "$prefix"
+  fi
+  if [[ -n ${SWAYSOCK:-} ]]; then
+    launch tty "$prefix" "$prefix/drive_c" wine cmd
+  elif [[ -t 0 && -t 1 ]]; then
+    # No display (e.g. a text console): run it right here; exit returns to DOS.
+    ( wine_env "$prefix"; cd "$prefix/drive_c"; wine cmd ) || true
+  else
+    die "start the display first"
+  fi
+}
+
+cmd_config() {
+  (( $# == 1 )) || die "usage: win config <name>"
+  need_wine; need_display
+  installed "$1" || die "no Windows app called '$1' (see: win list)"
+  local prefix; prefix="$(prefix_of "$1")"
+  launch log "$prefix" "$prefix/drive_c" winecfg
+}
+
+# ---------------------------------------------------------------- main
+
+sub="${1:-}"; shift || true
+case "$sub" in
+  install)          cmd_install "$@" ;;
+  run)              cmd_run "$@" ;;
+  list|ls)          cmd_list "$@" ;;
+  remove|rm)        cmd_remove "$@" ;;
+  tricks)           cmd_tricks "$@" ;;
+  cmd)              cmd_cmd "$@" ;;
+  config|cfg)       cmd_config "$@" ;;
+  _start)           cmd_start "$@" ;;
+  ""|help|-h|--help) usage ;;
+  *)                usage >&2; exit 1 ;;
+esac
