@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# help: install apps from Arch, the AUR, Debian, Ubuntu, Fedora or Flathub (install --help)
+set -euo pipefail
+DOS_ROOT="${DOS_ROOT:-/opt/dos}"
+# shellcheck source=SCRIPTDIR/../lib/dos.sh
+source "$DOS_ROOT/lib/dos.sh"
+# shellcheck source=SCRIPTDIR/../modules/70-apps/apps.sh
+source "$DOS_ROOT/modules/70-apps/apps.sh"
+
+usage() {
+  cat <<'EOF'
+install <pkg>                       Arch repos, then the AUR (paru)
+install --debian <pkg>              from a Debian container (also --ubuntu, --fedora, --arch)
+install --flatpak <app-id | term>   from Flathub, for this user
+install --search <term>             search every source
+Add --name <cmd> to choose the DOS command name. "apps" lists what's installed.
+EOF
+}
+
+# -------------------------------------------------------------- native ---
+
+install_native() {
+  local pkg=$1 name=$2 source
+  if pacman -Si -- "$pkg" >/dev/null 2>&1; then
+    source=pacman
+  else
+    source=aur
+  fi
+  apps_check_name "$name" "$source" "$pkg"
+  if [[ $source == pacman ]]; then
+    dos_pkg "$pkg"
+  else
+    dos_log "$pkg isn't in the Arch repos; trying the AUR"
+    dos_aur "$pkg" || dos_die "$pkg isn't in the Arch repos or the AUR (try: install --search $pkg)"
+  fi
+  finish host "$pkg" "$name" "$source" -
+}
+
+# ----------------------------------------------------------- container ---
+
+ensure_container() {
+  local distro=$1 c image
+  c=$(apps_container "$distro")
+  apps_container_exists "$distro" && return 0
+  image=$(apps_image "$distro")
+  dos_log "Creating the $c container from $image (once; this takes a few minutes)"
+  # Home, /dev/dri (Intel GPU), sound and the display are shared by default.
+  # No --nvidia (Intel graphics), no --init (no systemd inside, keeps it light),
+  # no menu entry for the container itself.
+  distrobox-create --yes --no-entry --name "$c" --image "$image" ||
+    dos_die "could not create the $c container"
+  # The first enter runs distrobox's setup inside the container.
+  apps_in "$distro" true || dos_die "could not start the $c container"
+}
+
+install_container() {
+  local distro=$1 pkg=$2 name=$3
+  apps_check_name "$name" "$distro" "$pkg"
+  [[ $DOS_TEST != 1 ]] || dos_die "DOS_TEST=1: not creating containers"
+  ensure_container "$distro"
+  local before
+  before=$(snapshot_file)
+  apps_probe "$distro" snapshot > "$before" || true
+  dos_log "Installing $pkg in $(apps_container "$distro")"
+  apps_pkg "$distro" install "$pkg" || { rm -f "$before"; dos_die "could not install $pkg from $distro"; }
+  finish "$distro" "$pkg" "$name" "$distro" "$before"
+}
+
+# ------------------------------------------------------------- flatpak ---
+
+is_app_id() { [[ $1 =~ ^[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+){2,}$ ]]; }
+
+# flatpak_pick TERM — print the Flathub app ID that matches TERM.
+flatpak_pick() {
+  local term=$1 lines=() line i choice
+  flatpak update --user --appstream flathub >/dev/null 2>&1 || true
+  # Not a terminal, so flatpak separates the columns with tabs.
+  mapfile -t lines < <(flatpak search --user --columns=application,name -- "$term" 2>/dev/null |
+    awk -F'\t' 'NF >= 2 && $1 ~ /\./')
+  (( ${#lines[@]} )) || dos_die "nothing on Flathub matches '$term'"
+  # One result, or an app whose name is exactly the term: take it.
+  for line in "${lines[@]}"; do
+    if [[ ${line#*$'\t'} == "$term" ]] || [[ ${#lines[@]} -eq 1 ]] ||
+       [[ $(apps_name "${line#*$'\t'}") == "$(apps_name "$term")" ]]; then
+      printf '%s\n' "${line%%$'\t'*}"; return 0
+    fi
+  done
+  [[ -t 0 ]] || dos_die "several Flathub apps match '$term'; give the app ID (install --search $term)"
+  for i in "${!lines[@]}"; do
+    (( i < 15 )) || break
+    printf '%3d  %-40s %s\n' "$((i + 1))" "${lines[i]%%$'\t'*}" "${lines[i]#*$'\t'}" >&2
+  done
+  read -rp "Install which one? (number) " choice
+  if ! [[ $choice =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#lines[@]} || choice > 15 )); then
+    dos_die "no app picked"
+  fi
+  printf '%s\n' "${lines[choice - 1]%%$'\t'*}"
+}
+
+install_flatpak() {
+  local what=$1 name=$2 id title
+  if is_app_id "$what"; then id=$what; else id=$(flatpak_pick "$what"); fi
+  dos_log "Installing $id from Flathub"
+  flatpak install --user --noninteractive -y flathub "$id" || dos_die "could not install $id from Flathub"
+  if [[ -z $name ]]; then
+    # The app's own name ("Discord"), else the last part of the ID.
+    title=$(flatpak list --user --app --columns=application,name | awk -F'\t' -v i="$id" '$1 == i { print $2; exit }')
+    name=$(apps_name "${title:-${id##*.}}")
+  fi
+  if ! (apps_check_name "$name" flatpak "$id"); then
+    dos_warn "$id is installed; run it with: flatpak run --user $id"
+    exit 1
+  fi
+  apps_wrapper "$name" "$id (from Flathub)" gui "flatpak run --user $(printf '%q' "$id")"
+  apps_add "$name" flatpak "$id" -
+  done_msg "$name"
+}
+
+# ---------------------------------------------------------------- finish ---
+
+snapshot_file() {
+  mkdir -p "$HOME/.cache/dos"   # home is shared, so the container sees this file
+  mktemp "$HOME/.cache/dos/snapshot.XXXXXX"
+}
+
+# finish WHERE PKG NAME SOURCE BEFORE — find the app, export it, write the wrapper.
+finish() {
+  local where=$1 pkg=$2 name=$3 source=$4 before=$5 kind path exec cmd label export=-
+  # On the host (BEFORE is -) the package's own file list is enough.
+  IFS=$'\t' read -r kind path exec < <(apps_probe "$where" detect "$pkg" "$(apps_manager "$source")" "$before") || kind=none
+  [[ $before == - ]] || rm -f "$before"
+  label=$pkg
+  [[ $where == host ]] || label="$pkg (from $where)"
+
+  case $where/$kind in
+    host/gui)
+      cmd="sh -c $(printf '%q' "$exec \"\$@\"") sh" ;;
+    host/cli)
+      cmd=$(printf '%q' "$path") ;;
+    */gui)
+      dos_log "Exporting $(basename "$path")"
+      apps_in "$where" distrobox-export --app "$path" >/dev/null ||
+        dos_warn "distrobox-export --app failed; the DOS command still works"
+      export=$path
+      cmd="distrobox-enter --name $(apps_container "$where") -- sh -c $(printf '%q' "$exec \"\$@\"") sh" ;;
+    */cli)
+      dos_log "Exporting $path"
+      mkdir -p "$DOS_APP_BIN"
+      apps_in "$where" distrobox-export --bin "$path" --export-path "$DOS_APP_BIN" >/dev/null ||
+        dos_die "distrobox-export --bin $path failed"
+      export=$path
+      cmd=$(printf '%q' "$DOS_APP_BIN/$(basename "$path")") ;;
+    *)
+      apps_add "$name" "$source" "$pkg" -
+      dos_warn "$pkg is installed, but it has no app or command to run (a library?). 'remove $name' undoes it."
+      exit 0 ;;
+  esac
+  apps_wrapper "$name" "$label" "$kind" "$cmd"
+  apps_add "$name" "$source" "$pkg" "$export"
+  done_msg "$name"
+}
+
+done_msg() { dos_log "Done. Type '$1' at the DOS prompt."; }
+
+# ---------------------------------------------------------------- search ---
+
+search_all() {
+  local term=$1 d
+  echo "== Arch repos (install <pkg>)"
+  pacman -Ss -- "$term" || echo "   nothing"
+  echo "== AUR (install <pkg>)"
+  if command -v paru >/dev/null 2>&1; then
+    paru -Ss --aur -- "$term" || echo "   nothing"
+  else
+    echo "   paru isn't set up yet; it's added on the first AUR install"
+  fi
+  for d in debian ubuntu fedora arch; do
+    echo "== ${d^} (install --$d <pkg>)"
+    if ! apps_container_exists "$d"; then
+      echo "   no dos-$d container yet; it's made on the first 'install --$d'"
+      continue
+    fi
+    case $d in
+      debian|ubuntu) apps_in "$d" apt-cache search -- "$term" ;;
+      fedora) apps_in "$d" dnf search -q "$term" ;;
+      arch) apps_in "$d" pacman -Ss -- "$term" ;;
+    esac || echo "   nothing"
+  done
+  echo "== Flathub (install --flatpak <app-id>)"
+  flatpak update --user --appstream flathub >/dev/null 2>&1 || true
+  flatpak search --user -- "$term" || echo "   nothing"
+}
+
+# ------------------------------------------------------------------ main ---
+
+main() {
+  local mode=native pkg="" name=""
+  while (( $# )); do
+    case $1 in
+      -h|--help) usage; exit 0 ;;
+      --debian|--ubuntu|--fedora|--arch|--flatpak|--search) mode=${1#--} ;;
+      --name) [[ $# -ge 2 ]] || dos_die "--name needs a command name"; name=$2; shift ;;
+      -*) dos_die "unknown option $1 (install --help)" ;;
+      *) [[ -z $pkg ]] || dos_die "one app at a time, please"; pkg=$1 ;;
+    esac
+    shift
+  done
+  [[ -n $pkg ]] || { usage >&2; exit 1; }
+  [[ -z $name ]] || name=$(apps_name "$name")
+
+  case $mode in
+    search)  search_all "$pkg" ;;
+    flatpak) install_flatpak "$pkg" "$name" ;;
+    native)  install_native "$pkg" "${name:-$(apps_name "$pkg")}" ;;
+    *)       install_container "$mode" "$pkg" "${name:-$(apps_name "$pkg")}" ;;
+  esac
+}
+
+main "$@"
