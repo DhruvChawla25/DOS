@@ -1,0 +1,8 @@
+# Extra packages for the DOS live system, on top of Arch's releng list.
+# Disk tools for the safe install next to Windows and Arch
+os-prober
+ntfs-3g
+e2fsprogs
+gptfdisk
+# Fetch scripts and configs during install
+git

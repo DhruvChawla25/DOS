@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# DOS installer — placeholder until the safe installer lands.
+echo "dos-install is not ready yet. Nothing was changed."
+exit 1
