@@ -18,7 +18,8 @@ if [ "$_dos_claude$_dos_gh$_dos_repo" != 111 ]; then
     $(_dos_mark "$_dos_gh") 3. GitHub    gh auth login    GitHub.com, HTTPS, log in with a browser
     $(_dos_mark "$_dos_repo") 4. Update    dos-update       fetches DOS and installs every feature
 
-  Later, run dos-update whenever DOS says updates are available.
+  After the first dos-update, log out (or reboot) and the DOS display
+  starts on tty1. Later, run dos-update whenever DOS says updates are available.
 
 MSG
   if ! command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ]; then
