@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 # dos-install — install the DOS base next to Windows 10 and Arch (triple boot).
 #
-#   dos-install --free /dev/sda    create a new DOS partition in the disk's largest free space
-#   dos-install /dev/sdaN          use an existing partition (it gets ERASED; you must type its name)
+#   dos-install --free /dev/sda    create a new DOS partition in the disk's largest free block
+#   dos-install /dev/sdaN          use an existing, EMPTY partition (it gets ERASED)
+#   dos-install --dry-run ...      run every check and print each change instead of making it
 #   dos-install --help
 #
 # Safety rules:
-#   * never touches the EFI partition except to write one small file, grub/custom.cfg
-#   * refuses NTFS (Windows / data), vfat (EFI), mounted partitions, and anything
-#     that looks like an existing Linux system
-#   * asks for the partition name to be typed before formatting
+#   * every check runs before anything is written, and you type the disk or
+#     partition name once to confirm
+#   * only GPT disks; never the pendrive DOS booted from
+#   * refuses EFI, Microsoft (reserved, recovery, data), swap, LVM, RAID and
+#     LUKS partitions, any filesystem other than an empty Linux one, mounted
+#     partitions, and anything that holds files (an installed system or data)
+#   * on the EFI partition it only edits one small file, grub/custom.cfg
 set -euo pipefail
 
 ROOTFS=/usr/share/dos/rootfs
@@ -18,110 +22,284 @@ ESP_MNT=/mnt/dos-esp
 USER_NAME=dhruv
 HOSTNAME_DOS=dos
 TIMEZONE=Asia/Kolkata
-MIN_GB=40
+MIN_GB="${DOS_INSTALL_MIN_GB:-40}"   # test hook; the real minimum is 40 GB
+# Loop devices are only accepted for the CI tests (the live system's own
+# squashfs is a loop device).
+ALLOW_LOOP="${DOS_INSTALL_ALLOW_LOOP:-0}"
+
+# GPT partition type GUIDs, lowercase as blkid prints them.
 ESP_GUID=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+declare -A REFUSED_TYPES=(
+  [$ESP_GUID]="the EFI partition"
+  [e3c9e316-0b5c-4db8-817d-f92df00215ae]="Microsoft reserved"
+  [de94bba4-06d1-4d40-a16a-bfd50179d6ac]="Windows recovery"
+  [ebd0a0a2-b9e5-4433-87c0-68b6b72699c7]="a Microsoft data partition (Windows or the data drive)"
+  [0657fd6d-a4ab-43c4-84e5-0933c84b4f4f]="Linux swap"
+  [e6d6d379-f507-44c2-a23c-238f2a3df928]="LVM"
+  [a19d880f-05fc-4d3b-a006-743f0f84911e]="Linux RAID"
+  [ca7d7ccb-63ed-4c53-861c-1742536059cc]="LUKS (encrypted)"
+)
 
 PACKAGES=(
   base linux linux-firmware intel-ucode
-  networkmanager sudo nano git github-cli base-devel
+  networkmanager sudo nano git github-cli base-devel curl
   zram-generator mesa vulkan-intel intel-media-driver libva-utils
   thermald power-profiles-daemon
 )
 
+DRY_RUN=0
+MODE=""        # free | part
+DISK=""        # disk that gets the DOS partition
+PART=""        # the DOS partition (for --free: the name it will get)
+NEW_NUM=""     # --free: partition number, first and last sector
+NEW_FIRST=""
+NEW_LAST=""
+ESP=""
+GRUB_HAS_CUSTOM=0
+MOUNTED_ROOT=0
+MOUNTED_ESP=0
+FORMATTED=0
+
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*" >&2; }
+warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
 fail() { printf '\033[1;31mdos-install:\033[0m %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# run CMD... — run a destructive command, or only print it with --dry-run.
+run() {
+  if (( DRY_RUN )); then printf '    [dry-run] %s\n' "$*" >&2; else "$@"; fi
+}
+
+cleanup() {
+  local rc=$?
+  if (( MOUNTED_ESP )); then umount "$ESP_MNT" 2>/dev/null || warn "could not unmount $ESP_MNT"; fi
+  if (( MOUNTED_ROOT )); then sync; umount -R "$MNT" 2>/dev/null || warn "could not unmount $MNT"; fi
+  if (( rc != 0 && FORMATTED )); then
+    warn "the install stopped part-way. Windows, the data drive and Arch were not touched;"
+    warn "$PART holds an unfinished DOS. Fix the problem and run dos-install $PART again."
+  fi
+}
+trap cleanup EXIT
+
+# probe DEV KEY — low-level blkid value (works without udev), empty if none.
+probe() { blkid -p -o value -s "$2" "$1" 2>/dev/null || true; }
+
+# part_of DISK NUMBER -> /dev/sda7, /dev/nvme0n1p7, /dev/mmcblk0p7, /dev/loop0p7
+part_of() { if [[ $1 =~ [0-9]$ ]]; then echo "${1}p$2"; else echo "$1$2"; fi; }
+
+# The disk the live system booted from (the pendrive), if known.
+live_disk() {
+  local src
+  src=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null) || return 0
+  [[ -b $src ]] || return 0
+  lsblk -ndo PKNAME "$src" 2>/dev/null | sed 's|^|/dev/|' || true
+}
 
 preflight() {
   [[ $EUID -eq 0 ]] || fail "run as root (the live system logs you in as root)."
-  [[ -d /sys/firmware/efi ]] || fail "not booted in UEFI mode. Boot the pendrive's UEFI entry from F12."
-  curl -fsS --max-time 10 -o /dev/null https://archlinux.org \
-    || fail "no internet. Connect first: iwctl  (station wlan0 connect <wifi-name>)"
+  local tools=(lsblk blkid findmnt sgdisk mount umount) t
+  (( DRY_RUN )) || tools+=(partprobe udevadm mkfs.ext4 pacstrap genfstab arch-chroot curl)
+  for t in "${tools[@]}"; do
+    command -v "$t" >/dev/null || fail "missing tool: $t"
+  done
+  if [[ ! -d /sys/firmware/efi ]]; then
+    (( DRY_RUN )) || fail "not booted in UEFI mode. Boot the pendrive's UEFI entry from F12."
+    warn "not booted in UEFI mode (ignored for --dry-run)."
+  fi
+  if (( DRY_RUN )); then
+    printf '    [dry-run] skipping the internet check\n' >&2
+  else
+    curl -fsS --max-time 10 -o /dev/null https://archlinux.org \
+      || fail "no internet. Connect first: iwctl  (station wlan0 connect <wifi-name>)"
+  fi
 }
 
-# part_of DISK NUMBER -> /dev/sda7 or /dev/nvme0n1p7
-part_of() { if [[ $1 =~ [0-9]$ ]]; then echo "${1}p$2"; else echo "$1$2"; fi; }
+check_disk() {
+  local disk="$1" type
+  [[ -b $disk ]] || fail "$disk is not a block device."
+  type=$(lsblk -dno TYPE "$disk")
+  [[ $type == disk || ( $type == loop && $ALLOW_LOOP == 1 ) ]] || fail "$disk is not a disk."
+  [[ $disk != "$(live_disk)" ]] || fail "$disk is the pendrive DOS booted from. Refusing."
+  [[ $(probe "$disk" PTTYPE) == gpt ]] \
+    || fail "$disk has no GPT partition table. DOS only installs on GPT (UEFI) disks. Refusing."
+}
 
-create_free_partition() {
-  local disk="$1"
-  [[ -b $disk && $(lsblk -dno TYPE "$disk") == disk ]] || fail "$disk is not a disk."
-  local before after new
-  before=$(lsblk -nlo NAME "$disk" | sort)
-  # sgdisk: start 0 = start of the largest free block, end 0 = end of that block.
-  local free_sectors
-  free_sectors=$(sgdisk -p "$disk" | awk '/Total free space/ {print $5}')
-  local free_gb=$(( free_sectors * 512 / 1024 / 1024 / 1024 ))
-  (( free_gb >= MIN_GB )) || fail "only ${free_gb} GB free on $disk; DOS needs ${MIN_GB} GB.
+sector_size() { cat "/sys/class/block/$(basename "$1")/queue/logical_block_size"; }
+
+# Plan a new partition in the largest free block. Writes nothing.
+plan_free_partition() {
+  DISK="$1"
+  check_disk "$DISK"
+  local ss first last used n free_gb
+  ss=$(sector_size "$DISK")
+  # -F: first sector of the largest free block, already aligned; -E: its last sector.
+  first=$(sgdisk -F "$DISK" 2>/dev/null | tail -n1)
+  last=$(sgdisk -E "$DISK" 2>/dev/null | tail -n1)
+  [[ $first =~ ^[0-9]+$ && $last =~ ^[0-9]+$ ]] || fail "could not read the free space on $DISK."
+  if (( first == 0 || last <= first )); then free_gb=0; else free_gb=$(( (last - first + 1) * ss / 1024**3 )); fi
+  (( free_gb >= MIN_GB )) || fail "the largest free block on $DISK is ${free_gb} GB; DOS needs ${MIN_GB} GB.
 Make space first, for example in Windows: Disk Management → right-click a volume → Shrink Volume."
-  say "Creating a DOS partition in the largest free space on $disk (about ${free_gb} GB free in total)."
-  confirm_typed "$(basename "$disk")" "create a new partition on"
-  sgdisk -n 0:0:0 -t 0:8304 -c 0:DOS "$disk" >/dev/null
-  partprobe "$disk"; udevadm settle
-  after=$(lsblk -nlo NAME "$disk" | sort)
-  new=$(comm -13 <(echo "$before") <(echo "$after") | head -1)
-  [[ -n $new ]] || fail "could not find the new partition."
-  echo "/dev/$new"
+  used=" $(sgdisk -p "$DISK" | awk '/^Number/ {t=1; next} t && $1 ~ /^[0-9]+$/ {print $1}' | tr '\n' ' ') "
+  for (( n = 1; n <= 128; n++ )); do [[ $used == *" $n "* ]] || break; done
+  (( n <= 128 )) || fail "$DISK has no free partition slot."
+  NEW_NUM=$n NEW_FIRST=$first NEW_LAST=$last
+  PART=$(part_of "$DISK" "$n")
+  [[ ! -e $PART ]] || fail "$PART already exists, but the partition table doesn't list it. Reboot and try again."
+  say "New partition: $PART, sectors $first-$last (${free_gb} GB, the largest free block on $DISK)."
 }
 
 check_existing_partition() {
-  local part="$1" fstype
-  [[ -b $part && $(lsblk -dno TYPE "$part") == part ]] || fail "$part is not a partition."
-  findmnt -S "$part" >/dev/null && fail "$part is mounted. Unmount it first."
-  [[ $(lsblk -dno PARTTYPE "$part") == "$ESP_GUID" ]] && fail "$part is the EFI partition. Refusing."
-  fstype=$(lsblk -dno FSTYPE "$part")
-  case "$fstype" in
-    ntfs|vfat|exfat|BitLocker) fail "$part is $fstype (Windows or data). Refusing." ;;
+  PART="$1"
+  local name type ptype fstype rc=0 size_gb
+  [[ -b $PART ]] || fail "$PART is not a block device."
+  name=$(basename "$PART")
+  type=$(lsblk -dno TYPE "$PART")
+  [[ $type == part ]] || fail "$PART is not a partition."
+  DISK=/dev/$(lsblk -ndo PKNAME "$PART")
+  check_disk "$DISK"
+
+  findmnt -S "$PART" >/dev/null && fail "$PART is mounted. Unmount it first."
+  swapon --noheadings --show=NAME 2>/dev/null | grep -qx "$PART" && fail "$PART is in use as swap. Refusing."
+  [[ -z $(ls -A "/sys/class/block/$name/holders" 2>/dev/null) ]] || fail "$PART is in use (LVM, RAID or encryption). Refusing."
+
+  ptype=$(probe "$PART" PART_ENTRY_TYPE)
+  ptype=${ptype,,}
+  [[ -z $ptype || -z ${REFUSED_TYPES[$ptype]:-} ]] || fail "$PART is ${REFUSED_TYPES[$ptype]}. Refusing."
+
+  size_gb=$(( $(cat "/sys/class/block/$name/size") * 512 / 1024**3 ))
+  (( size_gb >= MIN_GB )) || fail "$PART is ${size_gb} GB; DOS needs ${MIN_GB} GB. Refusing."
+
+  fstype=$(blkid -p -o value -s TYPE "$PART" 2>/dev/null) || rc=$?
+  case $rc in
+    0) ;;
+    2) fstype="" ;;   # no filesystem signature at all
+    *) fail "$PART has unclear or several signatures (blkid exit $rc). Refusing." ;;
   esac
-  if [[ $fstype == ext4 || $fstype == btrfs || $fstype == xfs ]]; then
-    local probe; probe=$(mktemp -d)
-    if mount -o ro "$part" "$probe" 2>/dev/null; then
-      if [[ -f $probe/etc/os-release ]]; then
-        local name
-        # shellcheck disable=SC1091
-        name=$(. "$probe/etc/os-release"; echo "${PRETTY_NAME:-Linux}")
-        umount "$probe"; rmdir "$probe"
-        fail "$part holds an installed system ($name). Refusing."
-      fi
-      umount "$probe"
-    fi
-    rmdir "$probe"
+  case $fstype in
+    "") ;;
+    ext2|ext3|ext4|btrfs|xfs|f2fs) check_empty_fs "$PART" "$fstype" ;;
+    *) fail "$PART holds a $fstype filesystem (Windows, data or another system). Refusing." ;;
+  esac
+}
+
+# check_empty_fs PART FSTYPE — refuse unless the filesystem holds no files.
+check_empty_fs() {
+  local part="$1" fstype="$2" probe_dir opts=ro found os=""
+  case $fstype in
+    ext*) opts=ro,noload ;;       # don't replay the journal
+    xfs)  opts=ro,norecovery ;;
+  esac
+  probe_dir=$(mktemp -d)
+  if ! mount -t "$fstype" -o "$opts" "$part" "$probe_dir" 2>/dev/null; then
+    rmdir "$probe_dir"
+    fail "$PART has a $fstype filesystem that can't be checked (mount failed). Refusing."
   fi
-  say "$part will be ERASED:"
-  lsblk -o NAME,SIZE,FSTYPE,LABEL "$part"
-  confirm_typed "$(basename "$part")" "ERASE"
+  found=$(find "$probe_dir" -mindepth 1 -maxdepth 1 ! -name lost+found -print -quit)
+  if [[ -e $probe_dir/etc/os-release || -e $probe_dir/usr/lib/os-release ]]; then
+    os=$(grep -hm1 '^PRETTY_NAME=' "$probe_dir/etc/os-release" "$probe_dir/usr/lib/os-release" 2>/dev/null \
+      | head -n1 | cut -d= -f2- | tr -d '"') || true
+    os=${os:-Linux}
+  fi
+  umount "$probe_dir"; rmdir "$probe_dir"
+  [[ -z $os ]] || fail "$part holds an installed system ($os). Refusing."
+  [[ -z $found ]] || fail "$part is not empty (it holds files). Refusing.
+If you're sure it holds nothing you need, wipe it yourself first: wipefs -a $part"
+}
+
+# Find the EFI partition that holds GRUB, preferring the target disk. Read-only.
+find_esp() {
+  local d p t live candidates=()
+  live=$(live_disk)
+  # shellcheck disable=SC2046  # one disk name per word
+  for d in "$DISK" $(lsblk -dnpo NAME,TYPE | awk '$2=="disk" {print $1}'); do
+    [[ $d == "$live" ]] && continue
+    while read -r p; do
+      t=$(probe "$p" PART_ENTRY_TYPE)
+      [[ ${t,,} == "$ESP_GUID" ]] && candidates+=("$p")
+    done < <(lsblk -nlpo NAME,TYPE "$d" | awk '$2=="part" {print $1}')
+  done
+  (( ${#candidates[@]} )) || fail "no EFI partition found. Nothing was changed."
+  mkdir -p "$ESP_MNT"
+  for p in "${candidates[@]}"; do
+    mount -o ro "$p" "$ESP_MNT" 2>/dev/null || continue
+    MOUNTED_ESP=1
+    if [[ -f $ESP_MNT/grub/grub.cfg ]]; then
+      ESP=$p
+      grep -q 'custom\.cfg' "$ESP_MNT/grub/grub.cfg" && GRUB_HAS_CUSTOM=1
+      if [[ ! -f $ESP_MNT/grub/x86_64-efi/ext2.mod ]]; then
+        warn "GRUB on $p has no ext2 module (grub/x86_64-efi/ext2.mod); it may not read DOS's ext4."
+        warn "If DOS doesn't boot, boot Arch and run: sudo grub-install --efi-directory=/boot"
+      fi
+    fi
+    umount "$ESP_MNT"; MOUNTED_ESP=0
+    [[ -n $ESP ]] && break
+  done
+  [[ -n $ESP ]] || fail "GRUB (grub/grub.cfg) not found on any EFI partition. Nothing was changed."
+  say "GRUB found on $ESP; DOS gets an entry in grub/custom.cfg."
+  (( GRUB_HAS_CUSTOM )) || warn "this grub.cfg doesn't load custom.cfg yet; you'll need to run grub-mkconfig in Arch once."
 }
 
 confirm_typed() {
   local want="$1" verb="$2" got
-  read -r -p "Type '$want' to $verb it, anything else cancels: " got
+  if (( DRY_RUN )); then
+    printf "    [dry-run] would ask you to type '%s' to %s it\n" "$want" "$verb" >&2
+    return
+  fi
+  read -r -p "Type '$want' to $verb it, anything else cancels: " got </dev/tty
   [[ $got == "$want" ]] || fail "cancelled. Nothing was changed."
 }
 
+create_partition() {
+  say "Creating partition $NEW_NUM on $DISK"
+  run sgdisk -n "$NEW_NUM:$NEW_FIRST:$NEW_LAST" -t "$NEW_NUM:8304" -c "$NEW_NUM:DOS" "$DISK"
+  (( DRY_RUN )) && return
+  partprobe "$DISK" || true
+  udevadm settle || true
+  local i
+  for (( i = 0; i < 20; i++ )); do [[ -b $PART ]] && break; sleep 0.5; done
+  [[ -b $PART ]] || fail "the partition was created but $PART didn't appear. Reboot the pendrive and run: dos-install $PART"
+  [[ $(cat "/sys/class/block/$(basename "$PART")/start") == "$NEW_FIRST" ]] \
+    || fail "$PART doesn't start where it was created. Stopping before formatting anything."
+}
+
 install_base() {
-  local part="$1"
-  say "Formatting $part as ext4 (label DOS)"
-  mkfs.ext4 -F -L DOS "$part" >/dev/null
-  mkdir -p "$MNT"
-  mount "$part" "$MNT"
-  trap 'umount -R "$MNT" 2>/dev/null || true' EXIT
+  say "Formatting $PART as ext4 (label DOS)"
+  run mkfs.ext4 -F -L DOS "$PART"
+  (( DRY_RUN )) || FORMATTED=1
+  run mkdir -p "$MNT"
+  run mount "$PART" "$MNT"
+  (( DRY_RUN )) || MOUNTED_ROOT=1
 
   say "Installing the DOS base (this takes a while on the HDD)"
-  pacstrap -K "$MNT" "${PACKAGES[@]}"
-  genfstab -U "$MNT" > "$MNT/etc/fstab"
+  run pacstrap -K "$MNT" "${PACKAGES[@]}"
+  # genfstab also lists the live system's active swaps; DOS uses zram instead.
+  if (( DRY_RUN )); then
+    printf '    [dry-run] genfstab -U %s (without swap lines) > %s/etc/fstab\n' "$MNT" "$MNT" >&2
+  else
+    genfstab -U "$MNT" | awk '$3 != "swap"' > "$MNT/etc/fstab"
+  fi
 
   say "Applying DOS settings"
-  cp -r "$ROOTFS/." "$MNT/"
-  chmod 0440 "$MNT/etc/sudoers.d/10-wheel"
-
+  run cp -r "$ROOTFS/." "$MNT/"
+  run chmod 0440 "$MNT/etc/sudoers.d/10-wheel"
+  if (( DRY_RUN )); then
+    printf '    [dry-run] write hostname %s, locale en_US.UTF-8, timezone %s\n' "$HOSTNAME_DOS" "$TIMEZONE" >&2
+    printf '    [dry-run] arch-chroot: locale-gen, useradd %s, enable NetworkManager thermald power-profiles-daemon\n' "$USER_NAME" >&2
+    printf '    [dry-run] write power-profiles-daemon performance drop-in\n' >&2
+    printf '    [dry-run] arch-chroot passwd %s\n' "$USER_NAME" >&2
+    printf '    [dry-run] arch-chroot runuser -l %s: Claude Code native installer\n' "$USER_NAME" >&2
+    return
+  fi
   echo "$HOSTNAME_DOS" > "$MNT/etc/hostname"
   sed -i 's/^#en_US.UTF-8/en_US.UTF-8/' "$MNT/etc/locale.gen"
   echo "LANG=en_US.UTF-8" > "$MNT/etc/locale.conf"
+  # No hwclock --systohc: the hardware clock is shared with Windows and Arch,
+  # and DOS reads it as UTC like the existing Arch does.
   arch-chroot "$MNT" /bin/bash -euo pipefail -c "
     ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
-    hwclock --systohc
     locale-gen >/dev/null
-    useradd -m -G wheel -s /bin/bash $USER_NAME
+    id -u $USER_NAME >/dev/null 2>&1 || useradd -m -G wheel -s /bin/bash $USER_NAME
     systemctl enable NetworkManager thermald power-profiles-daemon >/dev/null
   "
   # Performance profile on first boot (the laptop runs on mains, no battery).
@@ -130,29 +308,32 @@ install_base() {
     > "$MNT/etc/systemd/system/power-profiles-daemon.service.d/performance.conf"
 
   say "Set the password for $USER_NAME (used for sudo)"
-  until arch-chroot "$MNT" passwd "$USER_NAME"; do echo "Try again."; done
+  until arch-chroot "$MNT" passwd "$USER_NAME" </dev/tty; do echo "Try again."; done
 
+  # runuser -l gives a login shell: HOME=/home/dhruv and the default PATH.
+  # curl is in PACKAGES; arch-chroot binds the live system's resolv.conf.
   say "Installing Claude Code for $USER_NAME"
   if ! arch-chroot "$MNT" runuser -l "$USER_NAME" -c 'curl -fsSL https://claude.ai/install.sh | bash'; then
-    echo "Claude Code install failed; DOS will show the command to retry on first boot."
+    warn "Claude Code install failed; DOS shows the command to retry on first boot."
   fi
 }
 
 add_boot_entry() {
-  local part="$1" uuid esp
-  uuid=$(blkid -s UUID -o value "$part")
-  esp=$(lsblk -nlpo NAME,PARTTYPE | awk -v g="$ESP_GUID" '$2==g {print $1; exit}')
-  [[ -n $esp ]] || fail "no EFI partition found."
-  mkdir -p "$ESP_MNT"
-  mount "$esp" "$ESP_MNT"
-  local grubdir="$ESP_MNT/grub"
-  if [[ ! -f $grubdir/grub.cfg ]]; then
-    umount "$ESP_MNT"
-    fail "GRUB not found on $esp. DOS is installed but has no boot entry yet."
+  local uuid cfg tmp
+  if (( DRY_RUN )); then
+    uuid="<uuid of $PART>"
+  else
+    uuid=$(blkid -s UUID -o value "$PART")
+    [[ -n $uuid ]] || fail "could not read the UUID of $PART."
   fi
-  say "Adding DOS to the boot menu ($esp: grub/custom.cfg)"
-  cat > "$grubdir/custom.cfg" <<EOF
-# Added by dos-install. Arch's grub-mkconfig keeps this file (41_custom).
+  say "Adding DOS to the boot menu ($ESP: grub/custom.cfg)"
+  run mount "$ESP" "$ESP_MNT"
+  (( DRY_RUN )) || MOUNTED_ESP=1
+  cfg="$ESP_MNT/grub/custom.cfg"
+  local entry
+  entry=$(cat <<EOF
+### BEGIN DOS (dos-install) ###
+# Arch's grub-mkconfig loads this file through /etc/grub.d/41_custom.
 menuentry "DOS" --class dos {
     insmod part_gpt
     insmod ext2
@@ -160,31 +341,71 @@ menuentry "DOS" --class dos {
     linux /boot/vmlinuz-linux root=UUID=$uuid rw quiet loglevel=3
     initrd /boot/intel-ucode.img /boot/initramfs-linux.img
 }
+### END DOS ###
 EOF
-  if ! grep -q custom.cfg "$grubdir/grub.cfg"; then
+)
+  if (( DRY_RUN )); then
+    printf '    [dry-run] replace the DOS block in %s (other entries kept) with:\n' "$cfg" >&2
+    printf '%s\n' "$entry" | sed 's/^/        /' >&2
+  else
+    # Keep anything else already in custom.cfg; replace only our own block.
+    tmp="$cfg.dos-new"
+    { [[ -f $cfg ]] && sed '/^### BEGIN DOS (dos-install) ###$/,/^### END DOS ###$/d' "$cfg"
+      printf '%s\n' "$entry"; } > "$tmp"
+    mv "$tmp" "$cfg"
+    sync
+    umount "$ESP_MNT"; MOUNTED_ESP=0
+  fi
+  if (( ! GRUB_HAS_CUSTOM )); then
     echo "Note: this grub.cfg doesn't load custom.cfg yet. Boot Arch once and run:"
     echo "  sudo grub-mkconfig -o /boot/grub/grub.cfg"
   fi
-  umount "$ESP_MNT"
 }
 
 main() {
-  case "${1:-}" in
-    -h|--help|"") usage; exit 0 ;;
-  esac
-  preflight
-  lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS
-  local part
-  if [[ $1 == --free ]]; then
-    [[ -n ${2:-} ]] || fail "usage: dos-install --free /dev/sda"
-    part=$(create_free_partition "$2")
+  local args=()
+  while (( $# )); do
+    case $1 in
+      -h|--help) usage; exit 0 ;;
+      -n|--dry-run) DRY_RUN=1 ;;
+      --free) MODE=free; [[ -n ${2:-} ]] || fail "usage: dos-install --free /dev/sda"; DISK=$2; shift ;;
+      -*) fail "unknown option: $1 (see --help)" ;;
+      *) args+=("$1") ;;
+    esac
+    shift
+  done
+  if [[ $MODE == free ]]; then
+    (( ${#args[@]} == 0 )) || fail "--free takes a disk, not a partition as well."
   else
-    part="$1"
-    check_existing_partition "$part"
+    (( ${#args[@]} == 1 )) || { usage; exit 1; }
+    MODE=part
   fi
-  install_base "$part"
-  add_boot_entry "$part"
-  say "DOS is installed. Remove the pendrive and reboot, then pick DOS in the menu."
+  (( DRY_RUN )) && say "Dry run: checks run for real, nothing is written."
+
+  preflight
+  lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS >&2
+  if [[ $MODE == free ]]; then
+    plan_free_partition "$DISK"
+  else
+    check_existing_partition "${args[0]}"
+  fi
+  find_esp
+
+  if [[ $MODE == free ]]; then
+    confirm_typed "$(basename "$DISK")" "create a new DOS partition on"
+    create_partition
+  else
+    say "$PART will be ERASED:"
+    lsblk -o NAME,SIZE,FSTYPE,LABEL "$PART" >&2
+    confirm_typed "$(basename "$PART")" "ERASE"
+  fi
+  install_base
+  add_boot_entry
+  if (( DRY_RUN )); then
+    say "Dry run finished: DOS would go on $PART. Nothing was changed."
+  else
+    say "DOS is installed. Remove the pendrive and reboot, then pick DOS in the menu."
+  fi
 }
 
 main "$@"
