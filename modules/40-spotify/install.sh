@@ -9,7 +9,8 @@
 #    ~/.local/share/spotify-launcher/install. It checks for updates once a day
 #    at launch, so Spotify stays current without rebuilding anything.
 #  - The AUR package repackages the same .deb but has to be rebuilt through
-#    paru for every Spotify release, and needs Spotify's GPG key imported by hand (rotated 7 times so far).
+#    paru for every Spotify release, and needs Spotify's GPG key imported by
+#    hand (the PKGBUILD lists 7 rotated keys so far).
 set -euo pipefail
 # shellcheck source=../../lib/dos.sh source-path=SCRIPTDIR
 source "$(dirname "$0")/../../lib/dos.sh"

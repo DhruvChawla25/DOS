@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# help: Previous track
+set -euo pipefail
+# MPRIS through playerctl: Spotify if it's running, otherwise any other player.
+command -v playerctl >/dev/null 2>&1 || { echo "prev: playerctl is not installed; run dos-update" >&2; exit 1; }
+playerctl --player=spotify,%any previous 2>/dev/null || { echo "prev: no music player is running" >&2; exit 1; }
