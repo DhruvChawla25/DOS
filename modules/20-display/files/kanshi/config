@@ -1,0 +1,14 @@
+# DOS kanshi config. Installed by modules/20-display to ~/.config/kanshi/config.
+# Laptop alone: the panel. Panel + any monitor (HDMI): extend to the right.
+# `extend`, `single` and `external` change this until the next plug or unplug.
+
+profile laptop {
+    output eDP-1 enable position 0,0
+}
+
+profile extend {
+    output eDP-1 enable position 0,0
+    output * enable
+    # Place the monitor right of the panel using the panel's real width.
+    exec /usr/local/share/dos/commands/extend right
+}

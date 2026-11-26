@@ -4,11 +4,50 @@ on:
   pull_request:
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
+  # Job id kept as build-and-test: branch protection may require this check.
   build-and-test:
+    name: ShellCheck + contract
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: ShellCheck
+      - name: Install ShellCheck 0.11.0
         run: |
-          { find . -name '*.sh' -not -path './.git/*' -print0; printf '%s\0' iso/airootfs/usr/local/bin/*; } | xargs -0 -r shellcheck -x
+          curl -fsSL https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz \
+            | tar -xJ -C "$RUNNER_TEMP"
+          sudo install -m755 "$RUNNER_TEMP/shellcheck-v0.11.0/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
+      - name: make check (lib, modules, commands, scripts, tests, ISO bin, rootfs)
+        run: make check
+
+  install-safety:
+    name: dos-install safety (loop devices)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: archlinux:latest
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install disk tools
+        run: pacman -Syu --noconfirm --needed gptfdisk dosfstools ntfs-3g ntfsprogs e2fsprogs util-linux
+      - name: Refusals and --dry-run on fake disks
+        run: bash tests/install-safety.sh
+
+  modules:
+    name: Modules (DOS_TEST=1, as dhruv)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    container:
+      image: archlinux:latest
+    steps:
+      # git before checkout, so the checkout is a real repo (modules may use git).
+      - name: Base packages
+        run: pacman -Syu --noconfirm --needed sudo base-devel git
+      - uses: actions/checkout@v4
+      - name: Run every module twice (second run checks re-runs)
+        run: bash tests/run-modules.sh --ci

@@ -1,6 +1,11 @@
 name: ISO
 on:
+  # Only PRs that change what goes into the ISO; module PRs don't need it.
   pull_request:
+    paths:
+      - 'iso/**'
+      - 'scripts/build-iso.sh'
+      - '.github/workflows/iso.yml'
   push:
     tags: ['v*']
   workflow_dispatch:
@@ -23,7 +28,9 @@ jobs:
       - name: Build ISO
         run: |
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then v="${GITHUB_REF_NAME#v}"; else v="dev-${GITHUB_SHA::7}"; fi
-          DOS_VERSION="$v" bash scripts/build-iso.sh
+          # Non-release builds use zstd instead of xz: much faster to build.
+          fast=1; [[ "$GITHUB_REF_TYPE" == tag ]] && fast=0
+          DOS_VERSION="$v" DOS_ISO_FAST="$fast" bash scripts/build-iso.sh
       # Private repos have little artifact storage, so the ISO goes straight to a
       # release (release files don't count against it) and only for version tags.
       - name: Attach ISO to the release
@@ -31,6 +38,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           gh release create "$GITHUB_REF_NAME" out/*.iso --repo "$GITHUB_REPOSITORY" \
             --title "DOS $GITHUB_REF_NAME" --notes "Flash with balenaEtcher, boot with F12."

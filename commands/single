@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# help: use the laptop screen only (turns external monitors off)
+set -euo pipefail
+
+die() { echo "single: $*" >&2; exit 1; }
+[[ -n ${SWAYSOCK:-} ]] || die "start the display first"
+
+outs=$(swaymsg -t get_outputs) || die "can't reach sway"
+panel='^(eDP|LVDS)'
+int=$(jq -r --arg p "$panel" 'first(.[] | select(.name | test($p)) | .name) // empty' <<<"$outs")
+[[ -n $int ]] || die "laptop screen not found"
+
+# Turn the panel on first so there is never a moment with no screen.
+cmd="output $int enable; output $int position 0 0"
+while IFS= read -r o; do
+  [[ -n $o ]] && cmd+="; output $o disable"
+done < <(jq -r --arg p "$panel" '.[] | select(.name | test($p) | not) | .name' <<<"$outs")
+
+swaymsg -q "$cmd" || die "sway refused the change"
+echo "Laptop screen only."

@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# help: Epic Games library in Heroic (GTA 5 story mode); see docs/GAMES.md
+set -euo pipefail
+
+if ! command -v heroic >/dev/null 2>&1; then
+  echo "epic: Heroic is not installed (run dos-update)" >&2
+  exit 1
+fi
+if [[ ${DOS_TEST:-0} == 1 ]]; then
+  echo "epic: DOS_TEST=1, not launching Heroic"
+  exit 0
+fi
+if [[ -z ${SWAYSOCK:-} ]]; then
+  echo "start the display first" >&2
+  exit 1
+fi
+
+# Heroic keeps one instance; running it again brings the open window back.
+if ! swaymsg -q exec -- heroic; then
+  echo "epic: sway could not start Heroic" >&2
+  exit 1
+fi

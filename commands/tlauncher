@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# help: Minecraft through TLauncher (unofficial launcher, see docs/MINECRAFT.md)
+set -euo pipefail
+
+TL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/dos/tlauncher"
+TL_JAR="$TL_DIR/TLauncher.jar"
+# TLauncher's own window runs on Java 21. Each Minecraft version picks its
+# Java in TLauncher's settings (paths in docs/MINECRAFT.md).
+TL_JAVA=/usr/lib/jvm/java-21-openjdk/bin/java
+
+fail() { echo "tlauncher: $*" >&2; exit 1; }
+
+# Second stage: sway runs this as `tlauncher --run`, outside the DOS Shell.
+if [[ ${1:-} == --run ]]; then
+  cd "$TL_DIR"
+  # sway doesn't reparent windows; without this Java (AWT/Swing) windows can
+  # come up blank or with menus drawn at the wrong offset (sway wiki, "Java").
+  export _JAVA_AWT_WM_NONREPARENTING=1
+  # Mesa: run OpenGL calls on a separate thread. Minecraft makes a lot of small
+  # GL calls, and this helps the HD 520 on a 2-core CPU. The game inherits it.
+  export mesa_glthread=true
+  launch=("$TL_JAVA" -Dawt.useSystemAAFontSettings=on -Dswing.aatext=true -jar "$TL_JAR")
+  # GameMode (installed by the epic module) raises CPU/IO priority while playing.
+  if command -v gamemoderun >/dev/null 2>&1; then launch=(gamemoderun "${launch[@]}"); fi
+  exec "${launch[@]}" >"$TL_DIR/tlauncher.log" 2>&1
+fi
+
+[[ $EUID -ne 0 ]] || fail "don't run TLauncher as root"
+[[ -f $TL_JAR ]] || fail "TLauncher isn't installed, run dos-update"
+[[ -x $TL_JAVA ]] || fail "Java 21 is missing, run dos-update"
+[[ -n ${SWAYSOCK:-} ]] || { echo "start the display first" >&2; exit 1; }
+
+if pgrep -u "$EUID" -f -- "-jar $TL_JAR" >/dev/null 2>&1; then
+  echo "TLauncher is already running"
+  exit 0
+fi
+
+self=$(readlink -f "${BASH_SOURCE[0]}")
+# swaymsg exec hands the string to sh, so quote it.
+swaymsg exec -- "$(printf '%q --run' "$self")" >/dev/null || fail "sway couldn't start TLauncher"

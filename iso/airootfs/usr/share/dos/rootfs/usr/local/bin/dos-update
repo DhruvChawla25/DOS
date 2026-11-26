@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# dos-update — bring DOS up to date: pull the repo, upgrade packages, run every module.
+#
+#   dos-update                  pull, full system upgrade, run all modules
+#   dos-update --only NAME      run one module (20-display or display); repeatable
+#   dos-update --skip-system    don't run pacman -Syu / paru -Sua
+#   dos-update --list           show modules and when each last finished
+#   dos-update --check          quietly look for updates (the daily timer runs this)
+#   dos-update --notice         print "updates available" if there are some, once a day
+#   dos-update --dry-run        print what would happen, change nothing
+#   dos-update --yes            answer yes to pacman/paru (automatic when there's no terminal)
+#   dos-update --help
+#
+# Settings (environment): DOS_BRANCH (default main), DOS_DIR (default /opt/dos),
+# DOS_REPO (default DhruvChawla25/DOS). Run it as your user, not root.
+set -euo pipefail
+
+DOS_DIR="${DOS_DIR:-/opt/dos}"
+DOS_REPO="${DOS_REPO:-DhruvChawla25/DOS}"
+DOS_BRANCH="${DOS_BRANCH:-main}"
+DOS_STATE="${DOS_STATE:-$HOME/.local/state/dos}"
+INSTALLED=/usr/local/bin/dos-update
+
+say()  { printf '\033[1;36m==>\033[0m %s\n' "$*" >&2; }
+warn() { printf '\033[1;33m!! \033[0m %s\n' "$*" >&2; }
+fail() { printf '\033[1;31mdos-update:\033[0m %s\n' "$*" >&2; exit 1; }
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
+
+dry=0 skip_system=0 list=0 check=0 notice=0 yes=0
+only=()
+orig_args=("$@")
+
+parse_args() {
+  while (( $# )); do
+    case "$1" in
+      --only)        [[ -n ${2:-} ]] || fail "--only needs a module name"; only+=("$2"); shift ;;
+      --only=*)      only+=("${1#--only=}") ;;
+      --skip-system) skip_system=1 ;;
+      --list)        list=1 ;;
+      --check)       check=1 ;;
+      --notice)      notice=1 ;;
+      --dry-run|-n)  dry=1 ;;
+      --yes|-y)      yes=1 ;;
+      -h|--help)     usage; exit 0 ;;
+      *)             fail "unknown option: $1 (see dos-update --help)" ;;
+    esac
+    shift
+  done
+  [[ -t 0 ]] || yes=1
+}
+
+# run CMD... — run it, or just print it with --dry-run.
+run() {
+  if (( dry )); then printf '   would run: %s\n' "$*" >&2; else "$@"; fi
+}
+
+# ---- repo ----------------------------------------------------------------
+
+have_repo() { [[ -d $DOS_DIR/.git ]]; }
+
+clone_repo() {
+  command -v gh >/dev/null 2>&1 || fail "the GitHub CLI (gh) is missing: sudo pacman -S github-cli"
+  if ! gh auth status >/dev/null 2>&1; then
+    echo "run: gh auth login" >&2
+    exit 1
+  fi
+  say "First run: cloning $DOS_REPO into $DOS_DIR"
+  # /opt is root's; make an empty DOS_DIR we own, then clone into it.
+  if [[ ! -w $(dirname "$DOS_DIR") && ! -d $DOS_DIR ]] || [[ -d $DOS_DIR && ! -w $DOS_DIR ]]; then
+    run sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 755 "$DOS_DIR"
+  fi
+  if [[ -d $DOS_DIR ]] && [[ -n $(ls -A "$DOS_DIR" 2>/dev/null) ]]; then
+    fail "$DOS_DIR exists, isn't a git repo and isn't empty. Move it away and run dos-update again."
+  fi
+  run gh repo clone "$DOS_REPO" "$DOS_DIR" -- --branch "$DOS_BRANCH"
+}
+
+pull_repo() {
+  local cur
+  cur=$(git -C "$DOS_DIR" rev-parse --abbrev-ref HEAD)
+  if [[ $cur != "$DOS_BRANCH" ]]; then
+    say "Switching $DOS_DIR from $cur to $DOS_BRANCH"
+    run git -C "$DOS_DIR" fetch origin "$DOS_BRANCH"
+    run git -C "$DOS_DIR" checkout "$DOS_BRANCH"
+  fi
+  say "Pulling $DOS_REPO ($DOS_BRANCH)"
+  run git -C "$DOS_DIR" pull --ff-only origin "$DOS_BRANCH" \
+    || fail "git pull failed. Local changes in $DOS_DIR? See: git -C $DOS_DIR status"
+}
+
+# After a pull, the repo may hold a newer dos-update than the one running. Run that
+# one instead (it skips the pull), so fixes to dos-update apply on the same run.
+reexec_if_newer() {
+  local repo_copy="$DOS_DIR/scripts/dos-update"
+  [[ ${DOS_UPDATE_REEXEC:-0} == 1 || ! -f $repo_copy ]] && return 0
+  cmp -s "$repo_copy" "${BASH_SOURCE[0]}" && return 0
+  (( dry )) && { say "The repo has a newer dos-update; a real run would switch to it."; return 0; }
+  say "Switching to the newer dos-update from the repo"
+  DOS_UPDATE_REEXEC=1 DOS_UPDATE_T0="$t0" exec bash "$repo_copy" ${orig_args[@]+"${orig_args[@]}"}
+}
+
+# Keep /usr/local/bin/dos-update the same as the repo's copy.
+refresh_installed() {
+  local repo_copy="$DOS_DIR/scripts/dos-update"
+  [[ -f $repo_copy && -e $INSTALLED ]] || return 0
+  cmp -s "$repo_copy" "$INSTALLED" && return 0
+  say "Updating $INSTALLED"
+  run sudo install -m 755 "$repo_copy" "$INSTALLED" || warn "could not update $INSTALLED"
+}
+
+# ---- modules -------------------------------------------------------------
+
+all_modules() {
+  local f
+  for f in "$DOS_DIR"/modules/*/install.sh; do
+    [[ -f $f ]] && basename "$(dirname "$f")"
+  done | LC_ALL=C sort
+}
+
+# matches MODULE NAME: "20-display" matches "20-display" and "display".
+matches() { [[ $1 == "$2" || ${1#*-} == "$2" ]]; }
+
+selected_modules() {
+  local m n hit
+  if (( ${#only[@]} == 0 )); then all_modules; return; fi
+  for n in "${only[@]}"; do
+    hit=0
+    while read -r m; do
+      [[ -n $m ]] && matches "$m" "$n" && { echo "$m"; hit=1; }
+    done < <(all_modules)
+    (( hit )) || fail "no module named '$n' (see dos-update --list)"
+  done
+}
+
+list_modules() {
+  have_repo || fail "$DOS_DIR isn't set up yet. Run: dos-update"
+  local m when n=0
+  printf '%-24s %s\n' MODULE "LAST FINISHED"
+  while read -r m; do
+    [[ -n $m ]] || continue
+    n=$((n + 1))
+    if [[ -f $DOS_STATE/$m.done ]]; then when=$(<"$DOS_STATE/$m.done"); else when="never"; fi
+    printf '%-24s %s\n' "$m" "$when"
+  done < <(all_modules)
+  (( n )) || echo "(no modules yet)"
+  printf '\nrepo: %s on %s at %s\n' "$DOS_DIR" \
+    "$(git -C "$DOS_DIR" rev-parse --abbrev-ref HEAD)" "$(git -C "$DOS_DIR" log -1 --format='%h %cs %s')"
+}
+
+run_module() {
+  local m="$1" log="$DOS_STATE/logs/$1.log"
+  if (( dry )); then
+    printf '   would run: DOS_ROOT=%s bash %s\n' "$DOS_DIR" "$DOS_DIR/modules/$m/install.sh" >&2
+    return 0
+  fi
+  mkdir -p "$DOS_STATE/logs"
+  ( cd "$DOS_DIR" && DOS_ROOT="$DOS_DIR" bash "modules/$m/install.sh" ) 2>&1 | tee "$log"
+}
+
+# ---- system --------------------------------------------------------------
+
+upgrade_system() {
+  local nc=()
+  (( yes )) && nc=(--noconfirm)
+  say "Upgrading the system (pacman -Syu)"
+  run sudo pacman -Syu ${nc[@]+"${nc[@]}"} || return 1
+  if command -v paru >/dev/null 2>&1; then
+    say "Upgrading AUR packages (paru -Sua)"
+    run paru -Sua ${nc[@]+"${nc[@]}"} || return 1
+  fi
+}
+
+# ---- daily check ---------------------------------------------------------
+
+# Look for new DOS commits (and package updates, if pacman-contrib's checkupdates is
+# installed) and write them to $DOS_STATE/updates-available, or remove that file.
+# Quiet, never fails loudly, needs no sudo. The login notice reads the file.
+check_updates() {
+  have_repo || exit 0
+  mkdir -p "$DOS_STATE"
+  local to=() commits=0 pkgs=0
+  command -v timeout >/dev/null 2>&1 && to=(timeout 120)
+  if ${to[@]+"${to[@]}"} git -C "$DOS_DIR" fetch --quiet origin "$DOS_BRANCH" 2>/dev/null; then
+    commits=$(git -C "$DOS_DIR" rev-list --count "HEAD..origin/$DOS_BRANCH" 2>/dev/null || echo 0)
+  fi
+  if command -v checkupdates >/dev/null 2>&1; then
+    pkgs=$(${to[@]+"${to[@]}"} checkupdates 2>/dev/null | wc -l | tr -d ' ' || true)
+    [[ $pkgs =~ ^[0-9]+$ ]] || pkgs=0
+  fi
+  if (( commits > 0 || pkgs > 0 )); then
+    printf 'commits=%s\npackages=%s\n' "$commits" "$pkgs" > "$DOS_STATE/updates-available"
+  else
+    rm -f "$DOS_STATE/updates-available"
+  fi
+}
+
+# One line, at most once a day, only when the last check found something.
+show_notice() {
+  local f="$DOS_STATE/updates-available" stamp="$DOS_STATE/notice-shown" today line k v
+  [[ -f $f ]] || return 0
+  today=$(date +%F)
+  [[ -f $stamp && $(<"$stamp") == "$today" ]] && return 0
+  local commits=0 pkgs=0 parts=()
+  while IFS='=' read -r k v; do
+    case "$k" in commits) commits=$v ;; packages) pkgs=$v ;; esac
+  done < "$f"
+  plural() { if (( $1 == 1 )); then echo "1 $2"; else echo "$1 $2s"; fi; }
+  if (( commits > 0 )); then parts+=("$(plural "$commits" "DOS change")"); fi
+  if (( pkgs > 0 )); then parts+=("$(plural "$pkgs" package)"); fi
+  (( ${#parts[@]} )) || return 0
+  line="${parts[0]}${parts[1]:+, ${parts[1]}}"
+  printf '\033[1;33mDOS: updates available (%s). Run: dos-update\033[0m\n' "$line"
+  echo "$today" > "$stamp" 2>/dev/null || true
+}
+
+# ---- main ----------------------------------------------------------------
+
+fmt_time() { printf '%dm %02ds' $(($1 / 60)) $(($1 % 60)); }
+
+main() {
+  parse_args "$@"
+  [[ $EUID -ne 0 ]] || fail "run dos-update as your user, not root (it uses sudo when needed)."
+
+  if (( list )); then list_modules; exit 0; fi
+  if (( check )); then check_updates; exit 0; fi
+  if (( notice )); then show_notice; exit 0; fi
+
+  t0="${DOS_UPDATE_T0:-$(date +%s)}"
+  (( dry )) && say "Dry run: nothing will be changed."
+
+  # One dos-update at a time.
+  if command -v flock >/dev/null 2>&1 && (( ! dry )); then
+    mkdir -p "$DOS_STATE"
+    exec 9>"$DOS_STATE/update.lock"
+    flock -n 9 || fail "another dos-update is already running."
+  fi
+
+  if [[ ${DOS_UPDATE_REEXEC:-0} != 1 ]]; then
+    if have_repo; then pull_repo; else clone_repo; fi
+    reexec_if_newer
+  fi
+
+  # Pick the modules first, so a mistyped --only stops before the long upgrade.
+  local mods=() names m
+  if have_repo; then
+    names=$(selected_modules) || exit 1
+    while read -r m; do [[ -n $m ]] && mods+=("$m"); done <<<"$names"
+  elif (( dry )); then
+    say "(dry run: the repo isn't cloned, so there's no module list yet)"
+  fi
+
+  local system="skipped" ok=() failed=()
+  if (( ! skip_system )); then
+    if upgrade_system; then system="done"; else system="FAILED"; warn "system upgrade failed; running modules anyway"; fi
+  fi
+  refresh_installed
+
+  for m in ${mods[@]+"${mods[@]}"}; do
+    say "Module $m"
+    if run_module "$m"; then ok+=("$m"); else failed+=("$m"); warn "module $m failed (log: $DOS_STATE/logs/$m.log)"; fi
+  done
+
+  (( dry )) || rm -f "$DOS_STATE/updates-available"
+
+  local took=$(( $(date +%s) - t0 ))
+  echo
+  say "dos-update summary$(if (( dry )); then echo ' (dry run)'; fi)"
+  printf '   system upgrade:  %s\n' "$system"
+  printf '   modules ok:      %s\n' "${ok[*]:-none}"
+  printf '   modules failed:  %s\n' "${failed[*]:-none}"
+  printf '   time taken:      %s\n' "$(fmt_time "$took")"
+  if (( ${#failed[@]} )) || [[ $system == FAILED ]]; then
+    (( ${#failed[@]} )) && echo "   Logs: $DOS_STATE/logs/  Retry one: dos-update --skip-system --only <name>"
+    exit 1
+  fi
+}
+
+main "$@"

@@ -1,0 +1,10 @@
+[Unit]
+Description=DOS: look for updates (no changes are made)
+ConditionPathExists=/opt/dos/.git
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/dos-update --check
+Nice=19
+IOSchedulingClass=idle

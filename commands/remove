@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# help: remove an app added with install (remove <name>; "apps" lists them)
+set -euo pipefail
+DOS_ROOT="${DOS_ROOT:-/opt/dos}"
+# shellcheck source=SCRIPTDIR/../lib/dos.sh
+source "$DOS_ROOT/lib/dos.sh"
+# shellcheck source=SCRIPTDIR/../modules/70-apps/apps.sh
+source "$DOS_ROOT/modules/70-apps/apps.sh"
+
+if [[ $# -ne 1 || $1 == -* ]]; then
+  echo "usage: remove <name>   (see 'apps' for the names)" >&2
+  exit 1
+fi
+want=$1
+
+# Look up by command name, else by package if exactly one app has it.
+if ! row=$(apps_get "$want"); then
+  row=$(apps_rows | awk -F'\t' -v p="$want" '$3 == p' )
+  [[ -n $row && $row != *$'\n'* ]] || dos_die "no app called '$want' (see 'apps')"
+fi
+IFS=$'\t' read -r name source pkg export <<<"$row"
+
+case $source in
+  pacman|aur)
+    if pacman -Qq -- "$pkg" >/dev/null 2>&1; then
+      dos_log "Removing $pkg"
+      sudo pacman -Rns --noconfirm -- "$pkg" || dos_die "could not remove $pkg"
+    fi ;;
+  flatpak)
+    dos_log "Removing $pkg from Flathub apps"
+    flatpak uninstall --user --noninteractive -y "$pkg" || dos_warn "flatpak couldn't uninstall $pkg"
+    # Drop runtimes nothing uses any more.
+    flatpak uninstall --user --noninteractive -y --unused >/dev/null 2>&1 || true ;;
+  *)
+    apps_is_distro "$source" || dos_die "unknown source '$source' for $name in $DOS_APPS"
+    if apps_container_exists "$source"; then
+      # Delete the export first: distrobox-export reads the app's files to undo it.
+      case $export in
+        /usr/share/applications/*)
+          apps_in "$source" distrobox-export --app "$export" --delete >/dev/null || true ;;
+        /*)
+          apps_in "$source" distrobox-export --bin "$export" --export-path "$DOS_APP_BIN" --delete >/dev/null || true ;;
+      esac
+      dos_log "Removing $pkg from $(apps_container "$source")"
+      apps_pkg "$source" remove "$pkg" || dos_warn "could not remove $pkg inside $(apps_container "$source")"
+    else
+      dos_warn "the $(apps_container "$source") container is gone; just dropping the DOS command"
+    fi ;;
+esac
+
+rm -f "$DOS_USER_COMMANDS/$name"
+apps_del "$name"
+dos_log "Removed $name."
+
+if apps_is_distro "$source" && apps_container_exists "$source" &&
+   ! apps_rows | awk -F'\t' -v s="$source" '$2 == s { f = 1 } END { exit !f }'; then
+  echo "No apps left in $(apps_container "$source"). To free its disk space: distrobox-rm --force $(apps_container "$source")"
+fi

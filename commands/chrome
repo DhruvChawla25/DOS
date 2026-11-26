@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# help: chrome [url] — open Google Chrome (optionally at a URL)
+set -euo pipefail
+
+# Quote the URL for `swaymsg exec`. Sway keeps quotes on exec lines and hands
+# the line to `sh -c`, so single quotes protect spaces, ; and , from both sway
+# and sh. Characters that could end the quoting, or that sway would treat as a
+# $variable, are percent-encoded, which means the same thing inside a URL.
+quote_url() {
+  local u=$1
+  u=${u//\'/%27}; u=${u//\"/%22}; u=${u//\\/%5C}; u=${u//\$/%24}
+  printf "'%s'" "$u"
+}
+
+(( $# <= 1 )) || { echo "usage: chrome [url]" >&2; exit 1; }
+
+cmd=(google-chrome-stable)
+if [[ $# -eq 1 && -n $1 ]]; then cmd+=("$(quote_url "$1")"); fi
+
+if [[ ${DOS_TEST:-0} == 1 ]]; then
+  echo "swaymsg exec -- ${cmd[*]}"
+  exit 0
+fi
+
+[[ -n ${SWAYSOCK:-} ]] || { echo "start the display first" >&2; exit 1; }
+command -v google-chrome-stable >/dev/null 2>&1 \
+  || { echo "chrome: Google Chrome is not installed (run dos-update)" >&2; exit 1; }
+
+swaymsg exec -- "${cmd[*]}" >/dev/null \
+  || { echo "chrome: sway could not start Chrome" >&2; exit 1; }

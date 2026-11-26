@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# help: same as epic (Epic Games library in Heroic)
+set -euo pipefail
+exec "$(dirname "$(readlink -f "$0")")/epic" "$@"

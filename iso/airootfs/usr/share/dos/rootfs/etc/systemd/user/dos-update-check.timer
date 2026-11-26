@@ -1,0 +1,11 @@
+[Unit]
+Description=DOS: look for updates once a day
+
+[Timer]
+# Not at boot itself: the HDD is busy then.
+OnBootSec=15min
+OnUnitActiveSec=1d
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

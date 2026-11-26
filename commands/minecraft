@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# help: Minecraft (same as tlauncher)
+set -euo pipefail
+exec "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/tlauncher" "$@"
