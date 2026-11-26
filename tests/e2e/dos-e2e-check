@@ -27,6 +27,7 @@ chk opt-dos-owned      test "$(stat -c %U /opt/dos)" = dhruv
 chk no-swap-in-fstab   sh -c "! awk '\$3==\"swap\"' /etc/fstab | grep -q ."
 chk hostname-dos       test "$(cat /etc/hostname)" = dos
 chk pacman-works       pacman -Q linux
+chk multilib-synced    test -f /var/lib/pacman/sync/multilib.db
 # Informational only: a fresh DOS has no gh login yet, so this may stop early.
 runuser -l dhruv -c 'dos-update --dry-run --yes' 2>&1 | tail -n 5 | sed 's/^/DOS-E2E: note dos-update: /'
 say "boot done"

@@ -375,6 +375,9 @@ install_base() {
     install -d -o $USER_NAME -g $USER_NAME /opt/dos
   "
   grep -qx '\[multilib\]' "$MNT/etc/pacman.conf" || warn "could not enable [multilib] in /etc/pacman.conf; the epic module enables it later."
+  # Download the [multilib] package list now. Without it, the first
+  # "pacman -S" on DOS fails with "database file for 'multilib' does not exist".
+  arch-chroot "$MNT" pacman -Sy --noconfirm >/dev/null || warn "could not download the package lists; run: sudo pacman -Syu"
   # Performance profile on first boot (the laptop runs on mains, no battery).
   mkdir -p "$MNT/etc/systemd/system/power-profiles-daemon.service.d"
   printf '[Service]\nExecStartPost=/usr/bin/sh -c "sleep 2; powerprofilesctl set performance"\n' \
