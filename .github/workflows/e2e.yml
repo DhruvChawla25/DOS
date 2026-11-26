@@ -3,6 +3,13 @@ name: E2E
 # exactly like the laptop's, install DOS for real, then boot the installed DOS
 # through GRUB. See tests/e2e/run.sh.
 on:
+  push:
+    branches: [claude]
+    paths:
+      - 'iso/**'
+      - 'scripts/build-iso.sh'
+      - 'tests/e2e/**'
+      - '.github/workflows/e2e.yml'
   pull_request:
     paths:
       - 'iso/**'
