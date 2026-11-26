@@ -375,6 +375,9 @@ install_base() {
     install -d -o $USER_NAME -g $USER_NAME /opt/dos
   "
   grep -qx '\[multilib\]' "$MNT/etc/pacman.conf" || warn "could not enable [multilib] in /etc/pacman.conf; the epic module enables it later."
+  # Slow Wi-Fi: pacman's 10-second stall abort broke installs on the laptop.
+  grep -q '^DisableDownloadTimeout' "$MNT/etc/pacman.conf" \
+    || sed -i '/^\[options\]/a DisableDownloadTimeout' "$MNT/etc/pacman.conf"
   # Download the [multilib] package list now. Without it, the first
   # "pacman -S" on DOS fails with "database file for 'multilib' does not exist".
   arch-chroot "$MNT" pacman -Sy --noconfirm >/dev/null || warn "could not download the package lists; run: sudo pacman -Syu"

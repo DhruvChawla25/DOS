@@ -24,7 +24,17 @@ dos_pkg() {
   for p in "$@"; do pacman -Qq "$p" >/dev/null 2>&1 || missing+=("$p"); done
   (( ${#missing[@]} == 0 )) && return 0
   dos_log "Installing: ${missing[*]}"
-  sudo pacman -S --needed --noconfirm "${missing[@]}"
+  dos_retry 3 sudo pacman -S --needed --noconfirm "${missing[@]}"
+}
+
+# dos_retry N CMD... — run CMD up to N times (slow or flaky Wi-Fi), 10 s apart.
+dos_retry() {
+  local n=$1 i; shift
+  for (( i = 1; i <= n; i++ )); do
+    "$@" && return 0
+    (( i < n )) && { dos_warn "failed (try $i of $n), retrying in 10 s: $*"; sleep 10; }
+  done
+  return 1
 }
 
 # dos_aur PKG... — install AUR packages with paru (bootstrapped on first use).
@@ -34,7 +44,7 @@ dos_aur() {
   for p in "$@"; do pacman -Qq "$p" >/dev/null 2>&1 || missing+=("$p"); done
   (( ${#missing[@]} == 0 )) && return 0
   dos_log "Installing from AUR: ${missing[*]}"
-  paru -S --needed --noconfirm --skipreview "${missing[@]}"
+  dos_retry 3 paru -S --needed --noconfirm --skipreview "${missing[@]}"
 }
 
 dos_ensure_paru() {
