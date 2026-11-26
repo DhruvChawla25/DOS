@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Runs in the INSTALLED DOS on its first boot in the test VM (dos-e2e.service).
+say() { echo "DOS-E2E: $*"; }
+chk() { local name=$1; shift; if "$@" >/dev/null 2>&1; then say "check $name ok"; else say "check $name FAIL"; fi; }
+
+state=$(systemctl is-system-running --wait 2>/dev/null)
+say "booted installed DOS, state=$state, root=$(findmnt -no SOURCE /)"
+systemctl --failed --no-legend --plain | awk '{print $1}' | while read -r u; do say "failed-unit $u"; done
+for _ in $(seq 60); do who | grep -q '^dhruv \+tty1' && break; sleep 1; done
+
+chk root-is-vda7       test "$(findmnt -no SOURCE /)" = /dev/vda7
+chk autologin-tty1     sh -c "who | grep -q '^dhruv \+tty1'"
+chk user-in-wheel      sh -c "id -nG dhruv | grep -qw wheel"
+chk sudoers-valid      visudo -c
+chk zram-swap          sh -c "swapon --show=NAME --noheadings | grep -q zram"
+chk swappiness-180     test "$(sysctl -n vm.swappiness)" = 180
+chk networkmanager     systemctl is-active NetworkManager
+chk network-online     nm-online -t 60
+chk ppd-enabled        systemctl is-enabled power-profiles-daemon
+chk thermald-enabled   systemctl is-enabled thermald
+chk update-timer       test -e /etc/systemd/user/timers.target.wants/dos-update-check.timer
+chk dos-update-exec    test -x /usr/local/bin/dos-update
+chk claude-installed   test -x /home/dhruv/.local/bin/claude
+chk claude-runs        runuser -l dhruv -c '"$HOME/.local/bin/claude" --version'
+chk multilib           grep -qx '\[multilib\]' /etc/pacman.conf
+chk opt-dos-owned      test "$(stat -c %U /opt/dos)" = dhruv
+chk no-swap-in-fstab   sh -c "! awk '\$3==\"swap\"' /etc/fstab | grep -q ."
+chk hostname-dos       test "$(cat /etc/hostname)" = dos
+chk pacman-works       pacman -Q linux
+# Informational only: a fresh DOS has no gh login yet, so this may stop early.
+runuser -l dhruv -c 'dos-update --dry-run --yes' 2>&1 | tail -n 5 | sed 's/^/DOS-E2E: note dos-update: /'
+say "boot done"
+sync
+systemctl poweroff

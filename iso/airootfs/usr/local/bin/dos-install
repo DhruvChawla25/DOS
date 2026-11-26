@@ -30,6 +30,10 @@ WANT_GB=200                          # below this, warn: GTA 5 alone needs ~125 
 # Loop devices are only accepted for the CI tests (the live system's own
 # squashfs is a loop device).
 ALLOW_LOOP="${DOS_INSTALL_ALLOW_LOOP:-0}"
+# Test hooks for the end-to-end VM test (tests/e2e), which has nobody at the
+# keyboard: the typed confirmation and the password. Unset in real use.
+TEST_ANSWER="${DOS_INSTALL_TEST_ANSWER:-}"
+TEST_PASSWORD="${DOS_INSTALL_TEST_PASSWORD:-}"
 
 # GPT partition type GUIDs, lowercase as blkid prints them.
 ESP_GUID=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
@@ -260,7 +264,11 @@ confirm_typed() {
     printf "    [dry-run] would ask you to type '%s' to %s it\n" "$want" "$verb" >&2
     return
   fi
-  read -r -p "Type '$want' to $verb it, anything else cancels: " got </dev/tty
+  if [[ -n $TEST_ANSWER ]]; then
+    got=$TEST_ANSWER
+  else
+    read -r -p "Type '$want' to $verb it, anything else cancels: " got </dev/tty
+  fi
   [[ $got == "$want" ]] || fail "cancelled. Nothing was changed."
 }
 
@@ -330,7 +338,11 @@ install_base() {
     > "$MNT/etc/systemd/system/power-profiles-daemon.service.d/performance.conf"
 
   say "Set the password for $USER_NAME (used for sudo)"
-  until arch-chroot "$MNT" passwd "$USER_NAME" </dev/tty; do echo "Try again."; done
+  if [[ -n $TEST_PASSWORD ]]; then
+    printf '%s:%s\n' "$USER_NAME" "$TEST_PASSWORD" | arch-chroot "$MNT" chpasswd
+  else
+    until arch-chroot "$MNT" passwd "$USER_NAME" </dev/tty; do echo "Try again."; done
+  fi
 
   # runuser -l gives a login shell: HOME=/home/dhruv and the default PATH.
   # curl is in PACKAGES; arch-chroot binds the live system's resolv.conf.
