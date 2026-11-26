@@ -83,3 +83,12 @@ exec /usr/local/bin/dos-shell-loop
 exec kanshi
 
 include ~/.config/sway/config.d/*
+
+# Games on the HDMI monitor (workspace 3), the DOS Shell on the laptop screen
+# (workspace 1). Without the monitor, workspace 3 falls back to the laptop.
+workspace 1 output eDP-1
+workspace 3 output HDMI-A-1 eDP-1
+for_window [app_id="(?i)minecraft"] move container to workspace number 3, workspace number 3
+for_window [class="(?i)minecraft"] move container to workspace number 3, workspace number 3
+for_window [class="by-gdev-Main"] move container to workspace number 3, workspace number 3
+for_window [class="(?i)steam_app_|(?i)gta5|(?i)playgtav"] move container to workspace number 3, workspace number 3
