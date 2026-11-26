@@ -13,8 +13,11 @@ work=${E2E_WORK:-/var/tmp/dos-e2e}
 rm -rf "$work"; mkdir -p "$work"
 cd "$work"
 
-code=$(ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd 2>/dev/null | head -n1)
-vars=$(ls /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd /usr/share/edk2/x64/OVMF_VARS.4m.fd 2>/dev/null | head -n1)
+# First existing file of each (Ubuntu, older Ubuntu, Arch). Not ls | head:
+# ls exits 2 for the missing ones, which pipefail turns into a failure.
+first() { local f; for f in "$@"; do [[ -f $f ]] && { echo "$f"; return; }; done; }
+code=$(first /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/x64/OVMF_CODE.4m.fd)
+vars=$(first /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd /usr/share/edk2/x64/OVMF_VARS.4m.fd)
 [[ -n $code && -n $vars ]] || { echo "OVMF not found" >&2; exit 1; }
 accel=tcg cpu=max
 [[ -w /dev/kvm ]] && accel=kvm cpu=host

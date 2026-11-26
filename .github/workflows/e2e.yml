@@ -32,7 +32,7 @@ jobs:
           df -h /
       - name: Build ISO (archlinux container)
         run: |
-          docker run --rm --privileged -v "$PWD:/repo" -w /repo archlinux:latest bash -c '
+          docker run --rm --privileged -e GITHUB_SHA -v "$PWD:/repo" -w /repo archlinux:latest bash -c '
             pacman -Syu --noconfirm --needed archiso &&
             DOS_VERSION="e2e-${GITHUB_SHA::7}" DOS_ISO_FAST=1 WORK_DIR=/tmp/dos-build bash scripts/build-iso.sh'
           ls -lh out/
